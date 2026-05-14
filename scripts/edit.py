@@ -33,6 +33,7 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import subprocess
 import sys
@@ -641,6 +642,95 @@ def op_fps(input_path: Path, output_path: Path, fps: float,
 
 
 # ---------------------------------------------------------------------------
+# Texture and motion operations (Phase 2)
+# ---------------------------------------------------------------------------
+
+def op_vignette(input_path: Path, output_path: Path, strength: float,
+                cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Apply a soft vignette (edge darkening) effect."""
+    if not (0.1 <= strength <= 1.0):
+        raise SystemExit("[edit] --vignette strength must be between 0.1 and 1.0.")
+    _status(f"applying vignette (strength={strength})")
+    angle = strength * math.pi / 2
+    vf = f"vignette=angle={angle:.6f}"
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] vignette failed:\n{r.stderr}")
+
+
+def op_grain(input_path: Path, output_path: Path, strength: float,
+             cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Add analog film grain noise."""
+    if not (1 <= strength <= 50):
+        raise SystemExit("[edit] --grain strength must be between 1 and 50.")
+    grain = int(round(strength))
+    _status(f"adding grain (strength={strength})")
+    vf = f"noise=alls={grain}:allf=t+u"
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] grain failed:\n{r.stderr}")
+
+
+def op_reverse(input_path: Path, output_path: Path, meta: dict,
+               cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Play video (and audio) in reverse."""
+    if meta["duration_seconds"] > 600:
+        _status("Warning: reverse loads full video into RAM — may be slow for long clips.")
+    _status("reversing video")
+    has_audio = meta.get("has_audio", False)
+    cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vf", "reverse"]
+    if has_audio:
+        cmd += ["-af", "areverse"]
+    cmd += _strip_flags(strip_meta)
+    if has_audio:
+        cmd += cfg.video_flags() + cfg.audio_flags()
+    else:
+        cmd += cfg.video_flags()
+    cmd.append(str(output_path))
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] reverse failed:\n{r.stderr}")
+
+
+def op_loop(input_path: Path, output_path: Path, n: int,
+            cfg: EncodeConfig, strip_meta: bool, work_dir: Path) -> None:
+    """Repeat the clip N times back to back."""
+    if n < 2:
+        raise SystemExit("[edit] --loop N must be 2 or greater.")
+    _status(f"looping {n} times")
+    _concat_files([input_path] * n, output_path, cfg, strip_meta)
+
+
+def op_boomerang(input_path: Path, output_path: Path, meta: dict,
+                 cfg: EncodeConfig, strip_meta: bool, work_dir: Path) -> None:
+    """Concat clip + reversed clip (forward then backward)."""
+    if meta["duration_seconds"] > 300:
+        _status("Warning: boomerang reverses the full clip — may be slow for long clips.")
+    _status("creating boomerang (forward + reverse)")
+    has_audio = meta.get("has_audio", False)
+    reversed_path = work_dir / "boomerang_rev.mp4"
+    cmd = ["ffmpeg", "-y", "-i", str(input_path), "-vf", "reverse"]
+    if has_audio:
+        cmd += ["-af", "areverse"]
+    cmd += cfg.video_flags()
+    if has_audio:
+        cmd += cfg.audio_flags()
+    cmd.append(str(reversed_path))
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] boomerang reverse step failed:\n{r.stderr}")
+    _concat_files([input_path, reversed_path], output_path, cfg, strip_meta)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -733,6 +823,18 @@ def main() -> int:
     ap.add_argument("--fps", type=float, metavar="N",
                     help="Convert to constant frame rate N (e.g. 24)")
 
+    # Texture and motion (Phase 2)
+    ap.add_argument("--vignette", type=float, nargs="?", const=0.5, metavar="STRENGTH",
+                    help="Soft edge darkening, strength 0.1–1.0 (default 0.5)")
+    ap.add_argument("--grain", type=float, nargs="?", const=15.0, metavar="STRENGTH",
+                    help="Analog film grain noise, strength 1–50 (default 15)")
+    ap.add_argument("--reverse", action="store_true",
+                    help="Play video (and audio) in reverse")
+    ap.add_argument("--loop", type=int, metavar="N",
+                    help="Repeat clip N times (N >= 2)")
+    ap.add_argument("--boomerang", action="store_true",
+                    help="Concat clip + reversed clip (forward then backward)")
+
     # Output quality controls (global modifiers, not operations)
     ap.add_argument("--strip-metadata", action="store_true",
                     help="Remove GPS, device serial, timestamps, chapters from output")
@@ -813,6 +915,11 @@ def main() -> int:
         args.lut is not None,
         args.letterbox is not None,
         args.fps is not None,
+        args.vignette is not None,
+        args.grain is not None,
+        args.reverse,
+        args.loop is not None,
+        args.boomerang,
     ])
 
     if op_count == 0:
@@ -820,7 +927,8 @@ def main() -> int:
                          "--text, --mute, --volume, --replace-audio, --fade-in/out, "
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
-                         "--letterbox, or --fps.")
+                         "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
+                         "or --boomerang.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -930,6 +1038,21 @@ def main() -> int:
 
     elif args.fps is not None:
         op_fps(input_path, output_path, args.fps, cfg, strip_meta)
+
+    elif args.vignette is not None:
+        op_vignette(input_path, output_path, args.vignette, cfg, strip_meta)
+
+    elif args.grain is not None:
+        op_grain(input_path, output_path, args.grain, cfg, strip_meta)
+
+    elif args.reverse:
+        op_reverse(input_path, output_path, meta, cfg, strip_meta)
+
+    elif args.loop is not None:
+        op_loop(input_path, output_path, args.loop, cfg, strip_meta, work_dir)
+
+    elif args.boomerang:
+        op_boomerang(input_path, output_path, meta, cfg, strip_meta, work_dir)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
