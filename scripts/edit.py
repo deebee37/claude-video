@@ -43,6 +43,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 from frames import get_metadata, parse_time, format_time
+from looks import get_look_filter
 
 
 # ---------------------------------------------------------------------------
@@ -75,35 +76,96 @@ def _parse_size(size_str: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
+def _parse_ratio(s: str) -> float:
+    """Parse '2.35:1' or '2.35' → 2.35. Raise SystemExit on bad input."""
+    try:
+        if ":" in s:
+            num, den = s.split(":")
+            return float(num) / float(den)
+        return float(s)
+    except (ValueError, ZeroDivisionError):
+        raise SystemExit(f"[edit] Invalid ratio '{s}'. Use e.g. 2.35:1 or 2.35.")
+
+
+def _check_encoder(name: str) -> None:
+    """Verify ffmpeg has the given encoder. Raise SystemExit if missing."""
+    r = _run(["ffmpeg", "-hide_banner", "-encoders"], check=False)
+    if r.returncode != 0 or name not in r.stdout:
+        raise SystemExit(
+            f"[edit] Encoder '{name}' not found in this ffmpeg build. "
+            f"Use --codec h264 instead."
+        )
+
+
+class EncodeConfig:
+    """Output encoding parameters resolved from CLI flags."""
+
+    _PRESETS = {
+        "preview":  ("libx264", 28, "ultrafast"),
+        "standard": ("libx264", 18, "fast"),
+        "high":     ("libx264", 15, "medium"),
+        "master":   ("libx265", 16, "slow"),
+    }
+
+    def __init__(self, args):
+        codec_map = {"h264": "libx264", "h265": "libx265"}
+        base_codec, base_crf, base_preset = self._PRESETS[args.quality or "standard"]
+        self.vcodec   = codec_map.get(args.codec or "", base_codec)
+        self.crf      = args.crf if args.crf is not None else base_crf
+        if not (0 <= self.crf <= 51):
+            raise SystemExit(f"[edit] --crf must be 0–51. Got: {self.crf}")
+        self.vpreset  = args.preset or base_preset
+        self.abitrate = args.audio_bitrate or "192k"
+        if self.vcodec == "libx265":
+            _check_encoder("libx265")
+            _status("Warning: h265/slow encode may take several minutes for long clips.")
+
+    def video_flags(self) -> list[str]:
+        return ["-c:v", self.vcodec, "-preset", self.vpreset,
+                "-crf", str(self.crf), "-pix_fmt", "yuv420p"]
+
+    def audio_flags(self) -> list[str]:
+        return ["-c:a", "aac", "-b:a", self.abitrate]
+
+    @staticmethod
+    def audio_copy() -> list[str]:
+        return ["-c:a", "copy"]
+
+
+def _strip_flags(enabled: bool) -> list[str]:
+    """Return -map_metadata -1 -map_chapters -1 when --strip-metadata is set."""
+    return ["-map_metadata", "-1", "-map_chapters", "-1"] if enabled else []
+
+
 # ---------------------------------------------------------------------------
 # Individual edit operations
 # ---------------------------------------------------------------------------
 
-def op_trim(input_path: Path, output_path: Path, start: float, end: float | None) -> None:
+def op_trim(input_path: Path, output_path: Path, start: float, end: float | None,
+            cfg: EncodeConfig, strip_meta: bool) -> None:
     """Cut video to [start, end]. Tries stream copy first; falls back to re-encode."""
     _status(f"trimming {format_time(start)} → {format_time(end) if end else 'end'}")
     cmd_base = ["ffmpeg", "-y", "-ss", str(start)]
     if end is not None:
         cmd_base += ["-to", str(end)]
     cmd_base += ["-i", str(input_path)]
+    strip = _strip_flags(strip_meta)
 
     # Fast path: stream copy (lossless, instant)
-    r = _run(cmd_base + ["-c", "copy", str(output_path)], check=False)
+    r = _run(cmd_base + strip + ["-c", "copy", str(output_path)], check=False)
     if r.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
         return
 
     # Fallback: re-encode (handles HEVC, VFR, and other copy-incompatible formats)
     _status("stream copy failed, re-encoding (HEVC/VFR source?)")
-    r = _run(cmd_base + [
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-c:a", "aac", "-b:a", "192k",
-        str(output_path),
-    ], check=False)
+    r = _run(cmd_base + strip + cfg.video_flags() + cfg.audio_flags()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] trim failed:\n{r.stderr}")
 
 
-def op_cut(input_path: Path, output_path: Path, cut_start: float, cut_end: float, duration: float) -> None:
+def op_cut(input_path: Path, output_path: Path, cut_start: float, cut_end: float,
+           duration: float, cfg: EncodeConfig, strip_meta: bool) -> None:
     """Remove [cut_start, cut_end] from the video, keeping everything outside that range."""
     _status(f"cutting out {format_time(cut_start)} → {format_time(cut_end)}")
     work = output_path.parent
@@ -126,30 +188,33 @@ def op_cut(input_path: Path, output_path: Path, cut_start: float, cut_end: float
     if len(parts) == 1:
         shutil.copy(parts[0], output_path)
     else:
-        _concat_files(parts, output_path)
+        _concat_files(parts, output_path, cfg, strip_meta)
 
 
-def _concat_files(parts: list[Path], output_path: Path) -> None:
+def _concat_files(parts: list[Path], output_path: Path,
+                  cfg: EncodeConfig, strip_meta: bool) -> None:
     """Concatenate a list of video files using the concat filter (re-encodes)."""
     work = output_path.parent
     list_file = work / "concat_list.txt"
     list_file.write_text("\n".join(f"file '{p}'" for p in parts))
     r = _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-              "-i", str(list_file),
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "aac", "-b:a", "192k",
-              str(output_path)], check=False)
+              "-i", str(list_file)]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_flags()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] concat failed:\n{r.stderr}")
 
 
-def op_concat(inputs: list[Path], output_path: Path) -> None:
+def op_concat(inputs: list[Path], output_path: Path,
+              cfg: EncodeConfig, strip_meta: bool) -> None:
     """Join multiple video files together."""
     _status(f"concatenating {len(inputs)} clips")
-    _concat_files(inputs, output_path)
+    _concat_files(inputs, output_path, cfg, strip_meta)
 
 
-def op_speed(input_path: Path, output_path: Path, factor: float) -> None:
+def op_speed(input_path: Path, output_path: Path, factor: float,
+             cfg: EncodeConfig, strip_meta: bool) -> None:
     """Change playback speed. Factor > 1 = faster, < 1 = slower."""
     _status(f"changing speed to {factor}x")
     pts = 1.0 / factor
@@ -170,17 +235,18 @@ def op_speed(input_path: Path, output_path: Path, factor: float) -> None:
     af = _atempo_chain(factor)
 
     r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-vf", vf, "-af", af,
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "aac", "-b:a", "192k",
-              str(output_path)], check=False)
+              "-vf", vf, "-af", af]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_flags()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] speed change failed:\n{r.stderr}")
 
 
 def op_text(input_path: Path, output_path: Path,
             text: str, position: str, size: int, color: str,
-            start: float | None, end: float | None) -> None:
+            start: float | None, end: float | None,
+            cfg: EncodeConfig, strip_meta: bool) -> None:
     """Burn a text overlay onto the video."""
     _status(f"adding text overlay: '{text}'")
 
@@ -208,49 +274,57 @@ def op_text(input_path: Path, output_path: Path,
           f"{time_filter}")
 
     r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-vf", vf,
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy",
-              str(output_path)], check=False)
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] text overlay failed:\n{r.stderr}")
 
 
-def op_mute(input_path: Path, output_path: Path) -> None:
+def op_mute(input_path: Path, output_path: Path, strip_meta: bool) -> None:
     """Remove audio track."""
     _status("removing audio")
-    r = _run(["ffmpeg", "-y", "-i", str(input_path), "-an", "-c:v", "copy", str(output_path)], check=False)
+    r = _run(["ffmpeg", "-y", "-i", str(input_path), "-an", "-c:v", "copy"]
+             + _strip_flags(strip_meta)
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] mute failed:\n{r.stderr}")
 
 
-def op_volume(input_path: Path, output_path: Path, level: float) -> None:
+def op_volume(input_path: Path, output_path: Path, level: float,
+              cfg: EncodeConfig, strip_meta: bool) -> None:
     """Adjust audio volume."""
     _status(f"adjusting volume to {level}x")
     r = _run(["ffmpeg", "-y", "-i", str(input_path),
               "-af", f"volume={level}",
-              "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-              str(output_path)], check=False)
+              "-c:v", "copy"]
+             + cfg.audio_flags()
+             + _strip_flags(strip_meta)
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] volume adjustment failed:\n{r.stderr}")
 
 
-def op_replace_audio(input_path: Path, audio_path: Path, output_path: Path) -> None:
+def op_replace_audio(input_path: Path, audio_path: Path, output_path: Path,
+                     cfg: EncodeConfig, strip_meta: bool) -> None:
     """Replace video's audio with a different audio file."""
     _status(f"replacing audio with {audio_path.name}")
     r = _run(["ffmpeg", "-y",
               "-i", str(input_path),
               "-i", str(audio_path),
               "-map", "0:v", "-map", "1:a",
-              "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-              "-shortest",
-              str(output_path)], check=False)
+              "-c:v", "copy"]
+             + cfg.audio_flags()
+             + _strip_flags(strip_meta)
+             + ["-shortest", str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] audio replace failed:\n{r.stderr}")
 
 
 def op_fade(input_path: Path, output_path: Path,
-            fade_in: float | None, fade_out: float | None, duration: float) -> None:
+            fade_in: float | None, fade_out: float | None, duration: float,
+            cfg: EncodeConfig, strip_meta: bool) -> None:
     """Add fade-in and/or fade-out effects."""
     _status(f"adding fades (in={fade_in}s, out={fade_out}s)")
     vf_parts = []
@@ -268,25 +342,28 @@ def op_fade(input_path: Path, output_path: Path,
         cmd += ["-vf", ",".join(vf_parts)]
     if af_parts:
         cmd += ["-af", ",".join(af_parts)]
-    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k", str(output_path)]
+    cmd += _strip_flags(strip_meta)
+    cmd += cfg.video_flags() + cfg.audio_flags() + [str(output_path)]
     r = _run(cmd, check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] fade failed:\n{r.stderr}")
 
 
-def op_resize(input_path: Path, output_path: Path, width: int, height: int) -> None:
+def op_resize(input_path: Path, output_path: Path, width: int, height: int,
+              cfg: EncodeConfig, strip_meta: bool) -> None:
     """Resize video to target resolution."""
     _status(f"resizing to {width}x{height}")
     r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-vf", f"scale={width}:{height}",
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy", str(output_path)], check=False)
+              "-vf", f"scale={width}:{height}"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] resize failed:\n{r.stderr}")
 
 
-def op_rotate(input_path: Path, output_path: Path, degrees: int) -> None:
+def op_rotate(input_path: Path, output_path: Path, degrees: int,
+              cfg: EncodeConfig, strip_meta: bool) -> None:
     """Rotate video by 90, 180, or 270 degrees."""
     _status(f"rotating {degrees}°")
     rotate_map = {
@@ -298,20 +375,23 @@ def op_rotate(input_path: Path, output_path: Path, degrees: int) -> None:
     if not vf:
         raise SystemExit(f"[edit] Only 90, 180, 270 degree rotations supported. Got {degrees}.")
     r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-vf", vf,
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy", str(output_path)], check=False)
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] rotate failed:\n{r.stderr}")
 
 
-def op_crop(input_path: Path, output_path: Path, crop: str) -> None:
+def op_crop(input_path: Path, output_path: Path, crop: str,
+            cfg: EncodeConfig, strip_meta: bool) -> None:
     """Crop video. Format: W:H:X:Y"""
     _status(f"cropping to {crop}")
     r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-vf", f"crop={crop}",
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy", str(output_path)], check=False)
+              "-vf", f"crop={crop}"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] crop failed:\n{r.stderr}")
 
@@ -321,7 +401,8 @@ def op_crop(input_path: Path, output_path: Path, crop: str) -> None:
 # ---------------------------------------------------------------------------
 
 def op_overlay(input_path: Path, overlay_path: Path, output_path: Path,
-               x: int, y: int, scale: int | None) -> None:
+               x: int, y: int, scale: int | None,
+               cfg: EncodeConfig, strip_meta: bool) -> None:
     """Overlay a second video on top of the base video."""
     _status(f"overlaying {overlay_path.name} at ({x},{y})")
     scale_filter = f"[1]scale={scale}:-2[ov];" if scale else "[1]copy[ov];"
@@ -329,15 +410,16 @@ def op_overlay(input_path: Path, overlay_path: Path, output_path: Path,
     r = _run(["ffmpeg", "-y",
               "-i", str(input_path),
               "-i", str(overlay_path),
-              "-filter_complex", vf,
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy",
-              str(output_path)], check=False)
+              "-filter_complex", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] overlay failed:\n{r.stderr}")
 
 
-def op_side_by_side(left_path: Path, right_path: Path, output_path: Path) -> None:
+def op_side_by_side(left_path: Path, right_path: Path, output_path: Path,
+                    cfg: EncodeConfig, strip_meta: bool) -> None:
     """Place two videos side by side (horizontal stack). Auto-matches heights."""
     _status(f"side-by-side: {left_path.name} | {right_path.name}")
     h = get_metadata(str(left_path))["height"]
@@ -348,15 +430,16 @@ def op_side_by_side(left_path: Path, right_path: Path, output_path: Path) -> Non
               "-i", str(left_path),
               "-i", str(right_path),
               "-filter_complex", fc,
-              "-map", "[vout]", "-map", "0:a?",
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "aac", "-b:a", "192k",
-              str(output_path)], check=False)
+              "-map", "[vout]", "-map", "0:a?"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_flags()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] side-by-side failed:\n{r.stderr}")
 
 
-def op_stack(top_path: Path, bottom_path: Path, output_path: Path) -> None:
+def op_stack(top_path: Path, bottom_path: Path, output_path: Path,
+             cfg: EncodeConfig, strip_meta: bool) -> None:
     """Stack two videos vertically. Auto-matches widths."""
     _status(f"stacking: {top_path.name} / {bottom_path.name}")
     w = get_metadata(str(top_path))["width"]
@@ -367,16 +450,17 @@ def op_stack(top_path: Path, bottom_path: Path, output_path: Path) -> None:
               "-i", str(top_path),
               "-i", str(bottom_path),
               "-filter_complex", fc,
-              "-map", "[vout]", "-map", "0:a?",
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "aac", "-b:a", "192k",
-              str(output_path)], check=False)
+              "-map", "[vout]", "-map", "0:a?"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_flags()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] stack failed:\n{r.stderr}")
 
 
 def op_crossfade(clip1: Path, clip2: Path, output_path: Path,
-                 fade_duration: float, clip1_duration: float) -> None:
+                 fade_duration: float, clip1_duration: float,
+                 cfg: EncodeConfig, strip_meta: bool) -> None:
     """Crossfade transition between two clips. Handles silent inputs and mismatched sizes."""
     _status(f"crossfade ({fade_duration}s) between {clip1.name} and {clip2.name}")
     offset = max(0.0, clip1_duration - fade_duration)
@@ -400,14 +484,15 @@ def op_crossfade(clip1: Path, clip2: Path, output_path: Path,
     cmd = ["ffmpeg", "-y", "-i", str(clip1), "-i", str(clip2), "-filter_complex"]
     if both_have_audio:
         cmd.append(video_fc + f";[0:a][1:a]acrossfade=d={fade_duration:.3f}[aout]")
-        cmd += ["-map", "[vout]", "-map", "[aout]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-map", "[vout]", "-map", "[aout]"]
+        cmd += _strip_flags(strip_meta)
+        cmd += cfg.video_flags() + cfg.audio_flags()
     else:
         _status("one or both clips have no audio — video-only crossfade")
         cmd.append(video_fc)
-        cmd += ["-map", "[vout]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18"]
+        cmd += ["-map", "[vout]"]
+        cmd += _strip_flags(strip_meta)
+        cmd += cfg.video_flags()
     cmd.append(str(output_path))
 
     r = _run(cmd, check=False)
@@ -415,39 +500,144 @@ def op_crossfade(clip1: Path, clip2: Path, output_path: Path,
         raise SystemExit(f"[edit] crossfade failed:\n{r.stderr}")
 
 
-def op_convert(input_path: Path, output_path: Path) -> None:
+def op_convert(input_path: Path, output_path: Path,
+               cfg: EncodeConfig, strip_meta: bool) -> None:
     """Re-encode the video into a different container (format conversion)."""
     _status(f"converting to {output_path.suffix.lstrip('.')}")
-    r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "aac", "-b:a", "192k",
-              str(output_path)], check=False)
+    r = _run(["ffmpeg", "-y", "-i", str(input_path)]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_flags()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] convert failed:\n{r.stderr}")
 
 
 def op_pip(main_path: Path, pip_path: Path, output_path: Path,
-           position: str, pip_width: int) -> None:
+           position: str, pip_width: int,
+           cfg: EncodeConfig, strip_meta: bool) -> None:
     """Picture-in-picture: embed a smaller video in a corner."""
     _status(f"picture-in-picture ({position}): {pip_path.name}")
     # pip is scaled to pip_width, positioned in a corner with 20px margin
     pos_map = {
-        "top-right":    f"main_w-overlay_w-20:20",
+        "top-right":    "main_w-overlay_w-20:20",
         "top-left":     "20:20",
-        "bottom-right": f"main_w-overlay_w-20:main_h-overlay_h-20",
-        "bottom-left":  f"20:main_h-overlay_h-20",
+        "bottom-right": "main_w-overlay_w-20:main_h-overlay_h-20",
+        "bottom-left":  "20:main_h-overlay_h-20",
     }
     xy = pos_map.get(position, pos_map["top-right"])
     fc = f"[1]scale={pip_width}:-2[pip];[0][pip]overlay={xy}"
     r = _run(["ffmpeg", "-y",
               "-i", str(main_path),
               "-i", str(pip_path),
-              "-filter_complex", fc,
-              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy",
-              str(output_path)], check=False)
+              "-filter_complex", fc]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] pip failed:\n{r.stderr}")
+
+
+# ---------------------------------------------------------------------------
+# Cinematic operations (Phase 1)
+# ---------------------------------------------------------------------------
+
+def op_look(input_path: Path, output_path: Path, look_name: str,
+            cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Apply a named color preset (cinematic, moody, warm, etc.)."""
+    try:
+        vf = get_look_filter(look_name)
+    except ValueError as e:
+        raise SystemExit(f"[edit] {e}")
+    _status(f"applying look: {look_name}")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] look '{look_name}' failed:\n{r.stderr}")
+
+
+def op_lut(input_path: Path, output_path: Path, lut_path_str: str,
+           cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Apply a .cube 3D LUT for cinematic color grading."""
+    lut = Path(lut_path_str).expanduser().resolve()
+    if not lut.exists():
+        raise SystemExit(f"[edit] LUT file not found: {lut}")
+    if lut.suffix.lower() != ".cube":
+        raise SystemExit(f"[edit] LUT must be a .cube file. Got: {lut.suffix}")
+    # Escape for ffmpeg filter syntax: normalize separators, escape special chars, quote
+    safe_path = str(lut).replace("\\", "/")
+    safe_path = safe_path.replace("'", r"\'")
+    safe_path = safe_path.replace(":", r"\:")
+    vf = f"lut3d=file='{safe_path}'"
+    _status(f"applying LUT: {lut.name}")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        err = r.stderr.lower()
+        if "lut3d" in err and ("not found" in err or "no such filter" in err):
+            raise SystemExit(
+                "[edit] lut3d filter unavailable — this ffmpeg build lacks lut3d. "
+                "Try: ffmpeg -filters | grep lut3d"
+            )
+        raise SystemExit(f"[edit] LUT apply failed:\n{r.stderr}")
+
+
+def op_letterbox(input_path: Path, output_path: Path, ratio_str: str,
+                 cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Extend canvas with black bars to match a target aspect ratio using `pad`."""
+    ratio = _parse_ratio(ratio_str)
+    if ratio <= 0:
+        raise SystemExit(f"[edit] Ratio must be positive. Got: {ratio}")
+    meta = get_metadata(str(input_path))
+    w, h = meta["width"], meta["height"]
+    src_aspect = w / h
+
+    if abs(src_aspect - ratio) < 0.001:
+        raise SystemExit(
+            f"[edit] Source ({w}x{h}) already matches target ratio {ratio_str} — "
+            "no bars to add."
+        )
+
+    if src_aspect < ratio:
+        # Source narrower than target → extend horizontally (side bars)
+        target_w = int(h * ratio) & ~1
+        target_h = h
+        vf = f"pad={target_w}:{target_h}:(ow-iw)/2:0:color=black"
+    else:
+        # Source wider than target → extend vertically (true letterbox bars)
+        target_h = int(w / ratio) & ~1
+        target_w = w
+        vf = f"pad={target_w}:{target_h}:0:(oh-ih)/2:color=black"
+
+    _status(f"letterbox to {ratio_str}: {w}x{h} → {target_w}x{target_h}")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] letterbox failed:\n{r.stderr}")
+
+
+def op_fps(input_path: Path, output_path: Path, fps: float,
+           cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Convert to a constant target frame rate (forces CFR)."""
+    if fps <= 0:
+        raise SystemExit(f"[edit] --fps must be a positive number. Got: {fps}")
+    _status(f"converting to {fps} fps (CFR)")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", f"fps={fps}",
+              "-vsync", "cfr"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] fps conversion failed:\n{r.stderr}")
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +722,33 @@ def main() -> int:
     ap.add_argument("--convert", action="store_true",
                     help="Convert format only (no other edits). Pair with --format.")
 
+    # Cinematic operations (Phase 1)
+    ap.add_argument("--look", metavar="NAME",
+                    help="Apply a named color preset: cinematic, moody, warm, cool, "
+                         "bw, vintage, teal-orange, film")
+    ap.add_argument("--lut", metavar="PATH",
+                    help="Apply a .cube 3D LUT file for color grading")
+    ap.add_argument("--letterbox", metavar="RATIO",
+                    help="Add letterbox bars to target ratio, e.g. 2.35:1, 1.85:1")
+    ap.add_argument("--fps", type=float, metavar="N",
+                    help="Convert to constant frame rate N (e.g. 24)")
+
+    # Output quality controls (global modifiers, not operations)
+    ap.add_argument("--strip-metadata", action="store_true",
+                    help="Remove GPS, device serial, timestamps, chapters from output")
+    ap.add_argument("--quality", choices=["preview", "standard", "high", "master"],
+                    default=None,
+                    help="Export quality preset (default: standard = libx264 CRF 18 fast)")
+    ap.add_argument("--crf", type=int, default=None,
+                    help="CRF value 0–51 (lower = better quality). Overrides --quality.")
+    ap.add_argument("--codec", choices=["h264", "h265"], default=None,
+                    help="Video codec. h265 needs libx265 in ffmpeg build.")
+    ap.add_argument("--preset", choices=["ultrafast", "fast", "medium", "slow"],
+                    default=None,
+                    help="Encoder speed/compression tradeoff. Overrides --quality.")
+    ap.add_argument("--audio-bitrate", default=None,
+                    help="Output audio bitrate, e.g. 192k, 320k")
+
     args = ap.parse_args()
 
     _require("ffmpeg")
@@ -555,6 +772,10 @@ def main() -> int:
     duration = meta["duration_seconds"]
     _status(f"input: {input_path.name} ({format_time(duration)}, "
             f"{meta['width']}x{meta['height']}, {meta['codec']})")
+
+    # Resolve output encoding parameters once for all ops
+    cfg = EncodeConfig(args)
+    strip_meta = bool(args.strip_metadata)
 
     # Determine output path
     if args.output:
@@ -588,13 +809,18 @@ def main() -> int:
         args.crossfade is not None,
         args.pip is not None,
         args.convert,
+        args.look is not None,
+        args.lut is not None,
+        args.letterbox is not None,
+        args.fps is not None,
     ])
 
     if op_count == 0:
         raise SystemExit("[edit] No operation specified. Use --trim, --cut, --concat, --speed, "
                          "--text, --mute, --volume, --replace-audio, --fade-in/out, "
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
-                         "--stack, --crossfade, --pip, or --convert.")
+                         "--stack, --crossfade, --pip, --convert, --look, --lut, "
+                         "--letterbox, or --fps.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -603,92 +829,107 @@ def main() -> int:
         raw_start, raw_end = args.trim
         t_start = parse_time(raw_start) or 0.0
         t_end = None if raw_end.lower() == "end" else parse_time(raw_end)
-        op_trim(input_path, output_path, t_start, t_end)
+        op_trim(input_path, output_path, t_start, t_end, cfg, strip_meta)
 
     elif args.cut:
         t_start = parse_time(args.cut[0]) or 0.0
         t_end = parse_time(args.cut[1]) or duration
-        op_cut(input_path, output_path, t_start, t_end, duration)
+        op_cut(input_path, output_path, t_start, t_end, duration, cfg, strip_meta)
 
     elif args.concat:
         extra = [Path(f).expanduser().resolve() for f in args.concat]
         for p in extra:
             if not p.exists():
                 raise SystemExit(f"[edit] File not found: {p}")
-        op_concat([input_path] + extra, output_path)
+        op_concat([input_path] + extra, output_path, cfg, strip_meta)
 
     elif args.speed is not None:
-        op_speed(input_path, output_path, args.speed)
+        op_speed(input_path, output_path, args.speed, cfg, strip_meta)
 
     elif args.text is not None:
         t_start = parse_time(args.text_start) if args.text_start else None
         t_end = parse_time(args.text_end) if args.text_end else None
         op_text(input_path, output_path, args.text,
                 args.text_position, args.text_size, args.text_color,
-                t_start, t_end)
+                t_start, t_end, cfg, strip_meta)
 
     elif args.mute:
-        op_mute(input_path, output_path)
+        op_mute(input_path, output_path, strip_meta)
 
     elif args.volume is not None:
-        op_volume(input_path, output_path, args.volume)
+        op_volume(input_path, output_path, args.volume, cfg, strip_meta)
 
     elif args.replace_audio:
         audio_path = Path(args.replace_audio).expanduser().resolve()
         if not audio_path.exists():
             raise SystemExit(f"[edit] Audio file not found: {audio_path}")
-        op_replace_audio(input_path, audio_path, output_path)
+        op_replace_audio(input_path, audio_path, output_path, cfg, strip_meta)
 
     elif args.fade_in is not None or args.fade_out is not None:
-        op_fade(input_path, output_path, args.fade_in, args.fade_out, duration)
+        op_fade(input_path, output_path, args.fade_in, args.fade_out, duration,
+                cfg, strip_meta)
 
     elif args.resize:
         w, h = _parse_size(args.resize)
-        op_resize(input_path, output_path, w, h)
+        op_resize(input_path, output_path, w, h, cfg, strip_meta)
 
     elif args.rotate:
-        op_rotate(input_path, output_path, args.rotate)
+        op_rotate(input_path, output_path, args.rotate, cfg, strip_meta)
 
     elif args.crop:
-        op_crop(input_path, output_path, args.crop)
+        op_crop(input_path, output_path, args.crop, cfg, strip_meta)
 
     elif args.overlay:
         overlay_path = Path(args.overlay).expanduser().resolve()
         if not overlay_path.exists():
             raise SystemExit(f"[edit] Overlay file not found: {overlay_path}")
         op_overlay(input_path, overlay_path, output_path,
-                   args.overlay_x, args.overlay_y, args.overlay_scale)
+                   args.overlay_x, args.overlay_y, args.overlay_scale,
+                   cfg, strip_meta)
 
     elif args.side_by_side:
         right_path = Path(args.side_by_side).expanduser().resolve()
         if not right_path.exists():
             raise SystemExit(f"[edit] File not found: {right_path}")
-        op_side_by_side(input_path, right_path, output_path)
+        op_side_by_side(input_path, right_path, output_path, cfg, strip_meta)
 
     elif args.stack:
         bottom_path = Path(args.stack).expanduser().resolve()
         if not bottom_path.exists():
             raise SystemExit(f"[edit] File not found: {bottom_path}")
-        op_stack(input_path, bottom_path, output_path)
+        op_stack(input_path, bottom_path, output_path, cfg, strip_meta)
 
     elif args.crossfade:
         clip2_path = Path(args.crossfade).expanduser().resolve()
         if not clip2_path.exists():
             raise SystemExit(f"[edit] File not found: {clip2_path}")
         op_crossfade(input_path, clip2_path, output_path,
-                     args.crossfade_duration, duration)
+                     args.crossfade_duration, duration, cfg, strip_meta)
 
     elif args.pip:
         pip_path = Path(args.pip).expanduser().resolve()
         if not pip_path.exists():
             raise SystemExit(f"[edit] PiP file not found: {pip_path}")
-        op_pip(input_path, pip_path, output_path, args.pip_position, args.pip_width)
+        op_pip(input_path, pip_path, output_path, args.pip_position, args.pip_width,
+               cfg, strip_meta)
 
     elif args.convert:
         if not args.format and not args.output:
             raise SystemExit("[edit] --convert needs either --format or --output with a "
                              "different extension than the input.")
-        op_convert(input_path, output_path)
+        op_convert(input_path, output_path, cfg, strip_meta)
+
+    elif args.look is not None:
+        op_look(input_path, output_path, args.look, cfg, strip_meta)
+
+    elif args.lut is not None:
+        op_lut(input_path, output_path, args.lut, cfg, strip_meta)
+
+    elif args.letterbox is not None:
+        op_letterbox(input_path, output_path, args.letterbox, cfg, strip_meta)
+
+    elif args.fps is not None:
+        op_fps(input_path, output_path, args.fps, cfg, strip_meta)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata

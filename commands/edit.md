@@ -1,5 +1,5 @@
 ---
-description: Edit a video file using natural language. Trim, cut, join clips, add titles, adjust speed, change volume, fade in/out, resize, rotate. Works on any video from your phone or laptop. No AI generation — just real edits on your real footage.
+description: Edit a video file using natural language. Trim, cut, join clips, add titles, color grade (looks, LUTs), letterbox, change fps, strip metadata, adjust speed/volume/audio, fade in/out, resize, rotate, blend. Works on any video from your phone or laptop. No AI generation — just real edits on your real footage.
 argument-hint: <video-file> [instructions]
 allowed-tools: [Bash, Read, AskUserQuestion]
 ---
@@ -43,6 +43,21 @@ Silent on success. On error, follow the setup instructions. Skip on follow-up `/
 | "crossfade from clip1 into clip2" | `--crossfade clip2.mp4 [--crossfade-duration SECS]` |
 | "reaction video in the corner", "picture in picture" | `--pip reaction.mp4 [--pip-position top-right\|top-left\|bottom-right\|bottom-left] [--pip-width PX]` |
 
+**Cinematic / color:**
+
+| What user says | Flag to use |
+|---|---|
+| "make it look cinematic", "apply a moody/warm/cool/bw look" | `--look cinematic\|moody\|warm\|cool\|bw\|vintage\|teal-orange\|film` |
+| "apply this LUT", "use my .cube file" | `--lut /path/to/grade.cube` |
+| "give it a 2.35 cinema feel", "letterbox it to 1.85" | `--letterbox 2.35:1` (also `2.39:1`, `1.85:1`, `1.78:1`) |
+| "make it 24 fps", "convert to cinematic frame rate" | `--fps 24` |
+
+Notes:
+- `--look` uses built-in presets (`scripts/looks.py`) — no extra deps.
+- `--lut` requires a `.cube` file; `lut3d` filter must exist in your ffmpeg build.
+- `--letterbox` uses `pad` only (no crop, no stretch). Output dimensions grow to match target ratio; source content is centered with black bars.
+- `--fps` forces CFR output (safe for VFR sources like iPhone HEVC).
+
 **Format conversion:**
 
 | What user says | Flag to use |
@@ -51,6 +66,22 @@ Silent on success. On error, follow the setup instructions. Skip on follow-up `/
 | (combined with another op) "trim and save as .mov" | `--trim 0 30 --format mov` |
 
 Add `--format mp4|mov|mkv|webm` to any operation to control the output container. Default: match input extension. Use this when the source is `.mkv` but you need `.mp4`, or to convert iPhone HEVC clips to a more compatible format. Use `--convert` when format conversion is the *only* thing the user wants.
+
+**Output quality (global modifiers — combinable with any operation):**
+
+| Flag | Effect |
+|---|---|
+| `--quality preview\|standard\|high\|master` | Shorthand for codec/CRF/preset. `standard` = current default (libx264 CRF 18 fast). `master` uses libx265 CRF 16 slow (best quality, slower render). |
+| `--crf N` | Direct CRF 0–51 (lower = better). Overrides `--quality`. |
+| `--codec h264\|h265` | Override codec. h265 needs `libx265` in your ffmpeg build. |
+| `--preset ultrafast\|fast\|medium\|slow` | Encoder speed/compression tradeoff. |
+| `--audio-bitrate N` | e.g. `192k`, `320k`. |
+| `--strip-metadata` | Removes GPS, device serial, original timestamps, and chapters from the output. Use this on personal footage before sharing. |
+
+These flags compose with any operation. Example:
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/edit.py" clip.mp4 --look cinematic --quality master --strip-metadata --output ~/Desktop/final.mp4
+```
 
 Time format: `SS`, `MM:SS`, or `HH:MM:SS`. Use `end` for the end of the video.
 
