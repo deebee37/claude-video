@@ -45,7 +45,12 @@ Silent on success. On error, follow the setup instructions. Skip on follow-up `/
 
 **Format conversion:**
 
-Add `--format mp4|mov|mkv|webm` to any operation to control the output container. Default: match input extension. Use this when the source is `.mkv` but you need `.mp4`, or to convert iPhone HEVC clips to a more compatible format.
+| What user says | Flag to use |
+|---|---|
+| "just convert this mkv to mp4" | `--convert --format mp4` |
+| (combined with another op) "trim and save as .mov" | `--trim 0 30 --format mov` |
+
+Add `--format mp4|mov|mkv|webm` to any operation to control the output container. Default: match input extension. Use this when the source is `.mkv` but you need `.mp4`, or to convert iPhone HEVC clips to a more compatible format. Use `--convert` when format conversion is the *only* thing the user wants.
 
 Time format: `SS`, `MM:SS`, or `HH:MM:SS`. Use `end` for the end of the video.
 

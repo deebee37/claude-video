@@ -33,9 +33,6 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
-import json
-import math
-import os
 import shutil
 import subprocess
 import sys
@@ -45,7 +42,7 @@ from pathlib import Path
 # Reuse utilities from sibling modules
 _SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(_SCRIPT_DIR))
-from frames import get_metadata, parse_time, format_time, extract
+from frames import get_metadata, parse_time, format_time
 
 
 # ---------------------------------------------------------------------------
@@ -341,28 +338,38 @@ def op_overlay(input_path: Path, overlay_path: Path, output_path: Path,
 
 
 def op_side_by_side(left_path: Path, right_path: Path, output_path: Path) -> None:
-    """Place two videos side by side (horizontal stack)."""
+    """Place two videos side by side (horizontal stack). Auto-matches heights."""
     _status(f"side-by-side: {left_path.name} | {right_path.name}")
+    h = get_metadata(str(left_path))["height"]
+    fc = (f"[0:v]scale=-2:{h}[l];"
+          f"[1:v]scale=-2:{h}[r];"
+          f"[l][r]hstack=inputs=2[vout]")
     r = _run(["ffmpeg", "-y",
               "-i", str(left_path),
               "-i", str(right_path),
-              "-filter_complex", "[0][1]hstack=inputs=2",
+              "-filter_complex", fc,
+              "-map", "[vout]", "-map", "0:a?",
               "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy",
+              "-c:a", "aac", "-b:a", "192k",
               str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] side-by-side failed:\n{r.stderr}")
 
 
 def op_stack(top_path: Path, bottom_path: Path, output_path: Path) -> None:
-    """Stack two videos vertically."""
+    """Stack two videos vertically. Auto-matches widths."""
     _status(f"stacking: {top_path.name} / {bottom_path.name}")
+    w = get_metadata(str(top_path))["width"]
+    fc = (f"[0:v]scale={w}:-2[t];"
+          f"[1:v]scale={w}:-2[b];"
+          f"[t][b]vstack=inputs=2[vout]")
     r = _run(["ffmpeg", "-y",
               "-i", str(top_path),
               "-i", str(bottom_path),
-              "-filter_complex", "[0][1]vstack=inputs=2",
+              "-filter_complex", fc,
+              "-map", "[vout]", "-map", "0:a?",
               "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-              "-c:a", "copy",
+              "-c:a", "aac", "-b:a", "192k",
               str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] stack failed:\n{r.stderr}")
@@ -370,21 +377,53 @@ def op_stack(top_path: Path, bottom_path: Path, output_path: Path) -> None:
 
 def op_crossfade(clip1: Path, clip2: Path, output_path: Path,
                  fade_duration: float, clip1_duration: float) -> None:
-    """Crossfade transition between two clips."""
+    """Crossfade transition between two clips. Handles silent inputs and mismatched sizes."""
     _status(f"crossfade ({fade_duration}s) between {clip1.name} and {clip2.name}")
     offset = max(0.0, clip1_duration - fade_duration)
-    fc = (f"[0][1]xfade=transition=fade:duration={fade_duration:.3f}:offset={offset:.3f}[vout];"
-          f"[0:a][1:a]acrossfade=d={fade_duration:.3f}[aout]")
-    r = _run(["ffmpeg", "-y",
-              "-i", str(clip1),
-              "-i", str(clip2),
-              "-filter_complex", fc,
-              "-map", "[vout]", "-map", "[aout]",
+
+    meta1 = get_metadata(str(clip1))
+    meta2 = get_metadata(str(clip2))
+    both_have_audio = meta1.get("has_audio") and meta2.get("has_audio")
+    w, h = meta1["width"], meta1["height"]
+
+    if (meta2["width"], meta2["height"]) != (w, h):
+        _status(f"scaling clip 2 ({meta2['width']}x{meta2['height']}) to match clip 1 ({w}x{h})")
+
+    # Always scale clip 2 to match clip 1 (xfade requires identical sizes)
+    video_fc = (
+        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[c2v];"
+        f"[0:v]setsar=1[c1v];"
+        f"[c1v][c2v]xfade=transition=fade:duration={fade_duration:.3f}:offset={offset:.3f}[vout]"
+    )
+
+    cmd = ["ffmpeg", "-y", "-i", str(clip1), "-i", str(clip2), "-filter_complex"]
+    if both_have_audio:
+        cmd.append(video_fc + f";[0:a][1:a]acrossfade=d={fade_duration:.3f}[aout]")
+        cmd += ["-map", "[vout]", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k"]
+    else:
+        _status("one or both clips have no audio — video-only crossfade")
+        cmd.append(video_fc)
+        cmd += ["-map", "[vout]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18"]
+    cmd.append(str(output_path))
+
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] crossfade failed:\n{r.stderr}")
+
+
+def op_convert(input_path: Path, output_path: Path) -> None:
+    """Re-encode the video into a different container (format conversion)."""
+    _status(f"converting to {output_path.suffix.lstrip('.')}")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
               "-c:v", "libx264", "-preset", "fast", "-crf", "18",
               "-c:a", "aac", "-b:a", "192k",
               str(output_path)], check=False)
     if r.returncode != 0:
-        raise SystemExit(f"[edit] crossfade failed:\n{r.stderr}")
+        raise SystemExit(f"[edit] convert failed:\n{r.stderr}")
 
 
 def op_pip(main_path: Path, pip_path: Path, output_path: Path,
@@ -490,6 +529,8 @@ def main() -> int:
     ap.add_argument("--format", choices=["mp4", "mov", "mkv", "webm"],
                     default=None,
                     help="Output container format (default: match input extension)")
+    ap.add_argument("--convert", action="store_true",
+                    help="Convert format only (no other edits). Pair with --format.")
 
     args = ap.parse_args()
 
@@ -546,13 +587,14 @@ def main() -> int:
         args.stack is not None,
         args.crossfade is not None,
         args.pip is not None,
+        args.convert,
     ])
 
     if op_count == 0:
         raise SystemExit("[edit] No operation specified. Use --trim, --cut, --concat, --speed, "
                          "--text, --mute, --volume, --replace-audio, --fade-in/out, "
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
-                         "--stack, --crossfade, or --pip.")
+                         "--stack, --crossfade, --pip, or --convert.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -641,6 +683,12 @@ def main() -> int:
         if not pip_path.exists():
             raise SystemExit(f"[edit] PiP file not found: {pip_path}")
         op_pip(input_path, pip_path, output_path, args.pip_position, args.pip_width)
+
+    elif args.convert:
+        if not args.format and not args.output:
+            raise SystemExit("[edit] --convert needs either --format or --output with a "
+                             "different extension than the input.")
+        op_convert(input_path, output_path)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
