@@ -2,7 +2,10 @@
 """
 edit.py — AI-assisted video editor for claude-video.
 
-Wraps ffmpeg to perform non-destructive edits on real video files.
+Wraps ffmpeg to perform edits on real video files. Accepts any format
+ffmpeg supports (mp4, mov, mkv, avi, webm, HEVC, VP9, AV1, etc.).
+No content filtering — works on any video regardless of rating.
+
 Prints a markdown report to stdout with the output path and 3 preview
 frame paths. Status messages go to stderr.
 
@@ -19,6 +22,12 @@ Usage examples:
   python3 edit.py input.mp4 --resize 1920x1080
   python3 edit.py input.mp4 --rotate 90
   python3 edit.py input.mp4 --crop 1280:720:0:0
+  python3 edit.py base.mp4 --overlay logo.mp4 --overlay-x 10 --overlay-y 10
+  python3 edit.py left.mp4 --side-by-side right.mp4
+  python3 edit.py top.mp4 --stack bottom.mp4
+  python3 edit.py clip1.mp4 --crossfade clip2.mp4 --crossfade-duration 1.5
+  python3 edit.py main.mp4 --pip reaction.mp4 --pip-position top-right
+  python3 edit.py input.mkv --format mp4 --trim 0 60
 """
 
 from __future__ import annotations
@@ -74,13 +83,25 @@ def _parse_size(size_str: str) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 def op_trim(input_path: Path, output_path: Path, start: float, end: float | None) -> None:
-    """Cut video to [start, end] using stream copy (fast, lossless)."""
+    """Cut video to [start, end]. Tries stream copy first; falls back to re-encode."""
     _status(f"trimming {format_time(start)} → {format_time(end) if end else 'end'}")
-    cmd = ["ffmpeg", "-y", "-ss", str(start)]
+    cmd_base = ["ffmpeg", "-y", "-ss", str(start)]
     if end is not None:
-        cmd += ["-to", str(end)]
-    cmd += ["-i", str(input_path), "-c", "copy", str(output_path)]
-    r = _run(cmd, check=False)
+        cmd_base += ["-to", str(end)]
+    cmd_base += ["-i", str(input_path)]
+
+    # Fast path: stream copy (lossless, instant)
+    r = _run(cmd_base + ["-c", "copy", str(output_path)], check=False)
+    if r.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return
+
+    # Fallback: re-encode (handles HEVC, VFR, and other copy-incompatible formats)
+    _status("stream copy failed, re-encoding (HEVC/VFR source?)")
+    r = _run(cmd_base + [
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k",
+        str(output_path),
+    ], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] trim failed:\n{r.stderr}")
 
@@ -299,6 +320,98 @@ def op_crop(input_path: Path, output_path: Path, crop: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Blending / compositing operations
+# ---------------------------------------------------------------------------
+
+def op_overlay(input_path: Path, overlay_path: Path, output_path: Path,
+               x: int, y: int, scale: int | None) -> None:
+    """Overlay a second video on top of the base video."""
+    _status(f"overlaying {overlay_path.name} at ({x},{y})")
+    scale_filter = f"[1]scale={scale}:-2[ov];" if scale else "[1]copy[ov];"
+    vf = f"{scale_filter}[0][ov]overlay={x}:{y}"
+    r = _run(["ffmpeg", "-y",
+              "-i", str(input_path),
+              "-i", str(overlay_path),
+              "-filter_complex", vf,
+              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+              "-c:a", "copy",
+              str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] overlay failed:\n{r.stderr}")
+
+
+def op_side_by_side(left_path: Path, right_path: Path, output_path: Path) -> None:
+    """Place two videos side by side (horizontal stack)."""
+    _status(f"side-by-side: {left_path.name} | {right_path.name}")
+    r = _run(["ffmpeg", "-y",
+              "-i", str(left_path),
+              "-i", str(right_path),
+              "-filter_complex", "[0][1]hstack=inputs=2",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+              "-c:a", "copy",
+              str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] side-by-side failed:\n{r.stderr}")
+
+
+def op_stack(top_path: Path, bottom_path: Path, output_path: Path) -> None:
+    """Stack two videos vertically."""
+    _status(f"stacking: {top_path.name} / {bottom_path.name}")
+    r = _run(["ffmpeg", "-y",
+              "-i", str(top_path),
+              "-i", str(bottom_path),
+              "-filter_complex", "[0][1]vstack=inputs=2",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+              "-c:a", "copy",
+              str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] stack failed:\n{r.stderr}")
+
+
+def op_crossfade(clip1: Path, clip2: Path, output_path: Path,
+                 fade_duration: float, clip1_duration: float) -> None:
+    """Crossfade transition between two clips."""
+    _status(f"crossfade ({fade_duration}s) between {clip1.name} and {clip2.name}")
+    offset = max(0.0, clip1_duration - fade_duration)
+    fc = (f"[0][1]xfade=transition=fade:duration={fade_duration:.3f}:offset={offset:.3f}[vout];"
+          f"[0:a][1:a]acrossfade=d={fade_duration:.3f}[aout]")
+    r = _run(["ffmpeg", "-y",
+              "-i", str(clip1),
+              "-i", str(clip2),
+              "-filter_complex", fc,
+              "-map", "[vout]", "-map", "[aout]",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+              "-c:a", "aac", "-b:a", "192k",
+              str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] crossfade failed:\n{r.stderr}")
+
+
+def op_pip(main_path: Path, pip_path: Path, output_path: Path,
+           position: str, pip_width: int) -> None:
+    """Picture-in-picture: embed a smaller video in a corner."""
+    _status(f"picture-in-picture ({position}): {pip_path.name}")
+    # pip is scaled to pip_width, positioned in a corner with 20px margin
+    pos_map = {
+        "top-right":    f"main_w-overlay_w-20:20",
+        "top-left":     "20:20",
+        "bottom-right": f"main_w-overlay_w-20:main_h-overlay_h-20",
+        "bottom-left":  f"20:main_h-overlay_h-20",
+    }
+    xy = pos_map.get(position, pos_map["top-right"])
+    fc = f"[1]scale={pip_width}:-2[pip];[0][pip]overlay={xy}"
+    r = _run(["ffmpeg", "-y",
+              "-i", str(main_path),
+              "-i", str(pip_path),
+              "-filter_complex", fc,
+              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+              "-c:a", "copy",
+              str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] pip failed:\n{r.stderr}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -347,6 +460,37 @@ def main() -> int:
     ap.add_argument("--crop", metavar="W:H:X:Y",
                     help="Crop: width:height:x_offset:y_offset")
 
+    # Blending / compositing
+    ap.add_argument("--overlay", metavar="FILE",
+                    help="Overlay a second video on top of the input")
+    ap.add_argument("--overlay-x", type=int, default=0,
+                    help="X position of overlay (default: 0)")
+    ap.add_argument("--overlay-y", type=int, default=0,
+                    help="Y position of overlay (default: 0)")
+    ap.add_argument("--overlay-scale", type=int, default=None,
+                    help="Scale overlay to this width in pixels before placing")
+    ap.add_argument("--side-by-side", metavar="FILE",
+                    help="Place input and FILE side by side (horizontal)")
+    ap.add_argument("--stack", metavar="FILE",
+                    help="Stack input on top and FILE on bottom (vertical)")
+    ap.add_argument("--crossfade", metavar="FILE",
+                    help="Crossfade transition from input into FILE")
+    ap.add_argument("--crossfade-duration", type=float, default=1.0,
+                    help="Crossfade duration in seconds (default: 1.0)")
+    ap.add_argument("--pip", metavar="FILE",
+                    help="Picture-in-picture: embed FILE as a smaller overlay")
+    ap.add_argument("--pip-position",
+                    choices=["top-right", "top-left", "bottom-right", "bottom-left"],
+                    default="top-right",
+                    help="Corner for the PiP window (default: top-right)")
+    ap.add_argument("--pip-width", type=int, default=320,
+                    help="Width of PiP window in pixels (default: 320)")
+
+    # Output format override
+    ap.add_argument("--format", choices=["mp4", "mov", "mkv", "webm"],
+                    default=None,
+                    help="Output container format (default: match input extension)")
+
     args = ap.parse_args()
 
     _require("ffmpeg")
@@ -375,7 +519,10 @@ def main() -> int:
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
     else:
-        suffix = input_path.suffix or ".mp4"
+        if args.format:
+            suffix = f".{args.format}"
+        else:
+            suffix = input_path.suffix or ".mp4"
         output_path = work_dir / f"output{suffix}"
 
     # -----------------------------------------------------------------------
@@ -394,12 +541,18 @@ def main() -> int:
         args.resize is not None,
         args.rotate is not None,
         args.crop is not None,
+        args.overlay is not None,
+        args.side_by_side is not None,
+        args.stack is not None,
+        args.crossfade is not None,
+        args.pip is not None,
     ])
 
     if op_count == 0:
         raise SystemExit("[edit] No operation specified. Use --trim, --cut, --concat, --speed, "
                          "--text, --mute, --volume, --replace-audio, --fade-in/out, "
-                         "--resize, --rotate, or --crop.")
+                         "--resize, --rotate, --crop, --overlay, --side-by-side, "
+                         "--stack, --crossfade, or --pip.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -456,6 +609,38 @@ def main() -> int:
 
     elif args.crop:
         op_crop(input_path, output_path, args.crop)
+
+    elif args.overlay:
+        overlay_path = Path(args.overlay).expanduser().resolve()
+        if not overlay_path.exists():
+            raise SystemExit(f"[edit] Overlay file not found: {overlay_path}")
+        op_overlay(input_path, overlay_path, output_path,
+                   args.overlay_x, args.overlay_y, args.overlay_scale)
+
+    elif args.side_by_side:
+        right_path = Path(args.side_by_side).expanduser().resolve()
+        if not right_path.exists():
+            raise SystemExit(f"[edit] File not found: {right_path}")
+        op_side_by_side(input_path, right_path, output_path)
+
+    elif args.stack:
+        bottom_path = Path(args.stack).expanduser().resolve()
+        if not bottom_path.exists():
+            raise SystemExit(f"[edit] File not found: {bottom_path}")
+        op_stack(input_path, bottom_path, output_path)
+
+    elif args.crossfade:
+        clip2_path = Path(args.crossfade).expanduser().resolve()
+        if not clip2_path.exists():
+            raise SystemExit(f"[edit] File not found: {clip2_path}")
+        op_crossfade(input_path, clip2_path, output_path,
+                     args.crossfade_duration, duration)
+
+    elif args.pip:
+        pip_path = Path(args.pip).expanduser().resolve()
+        if not pip_path.exists():
+            raise SystemExit(f"[edit] PiP file not found: {pip_path}")
+        op_pip(input_path, pip_path, output_path, args.pip_position, args.pip_width)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
