@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Install the /watch skill into the current user's Claude Code environment.
+# Install the /watch and /edit skills into the current user's Claude Code environment.
 # Run once after cloning: bash scripts/install.sh
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL_LINK="$HOME/.claude/skills/watch"
 CMD_DIR="$HOME/.claude/commands"
-CMD_FILE="$CMD_DIR/watch.md"
 SETTINGS="$HOME/.claude/settings.json"
 
-echo "[watch] installing skill..."
+echo "[claude-video] installing skills..."
 
-# Symlink the skill
+# Symlink the skill directory
 if [[ -L "$SKILL_LINK" ]]; then
   echo "  skill already linked at $SKILL_LINK"
 elif [[ -e "$SKILL_LINK" ]]; then
@@ -23,10 +22,12 @@ else
   echo "  skill linked: $SKILL_LINK -> $REPO_DIR"
 fi
 
-# Install the /watch slash command
+# Install slash commands
 mkdir -p "$CMD_DIR"
-cp "$REPO_DIR/commands/watch.md" "$CMD_FILE"
-echo "  command installed: $CMD_FILE"
+cp "$REPO_DIR/commands/watch.md" "$CMD_DIR/watch.md"
+echo "  command installed: $CMD_DIR/watch.md"
+cp "$REPO_DIR/commands/edit.md" "$CMD_DIR/edit.md"
+echo "  command installed: $CMD_DIR/edit.md"
 
 # Add SessionStart hook to settings.json if not already present
 if [[ -f "$SETTINGS" ]] && grep -q "check-setup.sh" "$SETTINGS" 2>/dev/null; then
@@ -37,7 +38,7 @@ else
 fi
 
 # Run preflight
-echo "[watch] checking dependencies..."
+echo "[claude-video] checking dependencies..."
 python3 "$REPO_DIR/scripts/setup.py"
 
-echo "[watch] done. Restart Claude Code and try /watch <url>."
+echo "[claude-video] done. Restart Claude Code and try /watch <url> or /edit <video>."
