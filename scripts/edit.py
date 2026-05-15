@@ -165,6 +165,22 @@ def op_trim(input_path: Path, output_path: Path, start: float, end: float | None
         raise SystemExit(f"[edit] trim failed:\n{r.stderr}")
 
 
+def op_trim_precise(input_path: Path, output_path: Path, start: float, end: float | None,
+                    cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Frame-accurate trim via re-encode. No stream copy — start/end are exact."""
+    _status(f"precise trim {format_time(start)} → {format_time(end) if end else 'end'}")
+    cmd = ["ffmpeg", "-y", "-ss", str(start)]
+    if end is not None:
+        cmd += ["-to", str(end)]
+    cmd += ["-i", str(input_path)]
+    cmd += _strip_flags(strip_meta)
+    cmd += cfg.video_flags() + cfg.audio_flags()
+    cmd += [str(output_path)]
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] trim-precise failed:\n{r.stderr}")
+
+
 def op_cut(input_path: Path, output_path: Path, cut_start: float, cut_end: float,
            duration: float, cfg: EncodeConfig, strip_meta: bool) -> None:
     """Remove [cut_start, cut_end] from the video, keeping everything outside that range."""
@@ -746,6 +762,9 @@ def main() -> int:
     # Operations
     ap.add_argument("--trim", nargs=2, metavar=("START", "END"),
                     help="Trim to time range. Times: SS, MM:SS, HH:MM:SS, or 'end'")
+    ap.add_argument("--trim-precise", nargs=2, metavar=("START", "END"),
+                    help="Frame-accurate trim (always re-encodes). Use when --trim's "
+                         "keyframe snapping causes visible extra frames at cut points.")
     ap.add_argument("--cut", nargs=2, metavar=("START", "END"),
                     help="Remove section between START and END")
     ap.add_argument("--concat", nargs="+", metavar="FILE",
@@ -894,6 +913,7 @@ def main() -> int:
     # -----------------------------------------------------------------------
     op_count = sum([
         args.trim is not None,
+        args.trim_precise is not None,
         args.cut is not None,
         args.concat is not None,
         args.speed is not None,
@@ -923,7 +943,7 @@ def main() -> int:
     ])
 
     if op_count == 0:
-        raise SystemExit("[edit] No operation specified. Use --trim, --cut, --concat, --speed, "
+        raise SystemExit("[edit] No operation specified. Use --trim, --trim-precise, --cut, --concat, --speed, "
                          "--text, --mute, --volume, --replace-audio, --fade-in/out, "
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
@@ -938,6 +958,12 @@ def main() -> int:
         t_start = parse_time(raw_start) or 0.0
         t_end = None if raw_end.lower() == "end" else parse_time(raw_end)
         op_trim(input_path, output_path, t_start, t_end, cfg, strip_meta)
+
+    elif args.trim_precise:
+        raw_start, raw_end = args.trim_precise
+        t_start = parse_time(raw_start) or 0.0
+        t_end = None if raw_end.lower() == "end" else parse_time(raw_end)
+        op_trim_precise(input_path, output_path, t_start, t_end, cfg, strip_meta)
 
     elif args.cut:
         t_start = parse_time(args.cut[0]) or 0.0
