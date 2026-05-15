@@ -785,6 +785,41 @@ def op_stabilize(input_path: Path, output_path: Path,
         raise SystemExit(f"[edit] stabilize pass 2 failed:\n{r.stderr}")
 
 
+def op_blur(input_path: Path, output_path: Path, region: str,
+            meta: dict, cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Blur a rectangular region for privacy (faces, plates, etc.)."""
+    parts = region.split(":")
+    if len(parts) != 4:
+        raise SystemExit(f"[edit] --blur requires W:H:X:Y format. Got: {region!r}")
+    try:
+        w, h, x, y = (int(p) for p in parts)
+    except ValueError:
+        raise SystemExit(f"[edit] --blur values must be integers. Got: {region!r}")
+    if w <= 0 or h <= 0:
+        raise SystemExit(f"[edit] --blur W and H must be positive. Got: W={w}, H={h}")
+    if x < 0 or y < 0:
+        raise SystemExit(f"[edit] --blur X and Y must be non-negative. Got: X={x}, Y={y}")
+    vid_w, vid_h = meta["width"], meta["height"]
+    if x + w > vid_w or y + h > vid_h:
+        raise SystemExit(
+            f"[edit] --blur region {w}x{h} at ({x},{y}) extends outside "
+            f"video bounds {vid_w}x{vid_h}."
+        )
+    w = w & ~1
+    h = h & ~1
+    if w < 2 or h < 2:
+        raise SystemExit("[edit] --blur W and H must be at least 2 after rounding to even.")
+    _status(f"blurring region {w}x{h} at ({x},{y})")
+    fc = f"[0]crop={w}:{h}:{x}:{y},boxblur=20:5[b];[0][b]overlay={x}:{y}"
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-filter_complex", fc]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] blur failed:\n{r.stderr}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -896,6 +931,9 @@ def main() -> int:
                     help="Two-pass video stabilization (vidstabdetect + vidstabtransform). "
                          "Requires ffmpeg built with libvidstab. "
                          "Check: ffmpeg -filters | grep vidstab")
+    ap.add_argument("--blur", metavar="W:H:X:Y",
+                    help="Blur a rectangular region for privacy (faces, plates, etc.). "
+                         "Format: width:height:x:y (pixels, top-left origin).")
 
     # Output quality controls (global modifiers, not operations)
     ap.add_argument("--strip-metadata", action="store_true",
@@ -984,6 +1022,7 @@ def main() -> int:
         args.loop is not None,
         args.boomerang,
         args.stabilize,
+        args.blur is not None,
     ])
 
     if op_count == 0:
@@ -992,7 +1031,7 @@ def main() -> int:
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
                          "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
-                         "or --boomerang, --stabilize.")
+                         "or --boomerang, --stabilize, --blur.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -1126,6 +1165,9 @@ def main() -> int:
 
     elif args.stabilize:
         op_stabilize(input_path, output_path, cfg, strip_meta, work_dir)
+
+    elif args.blur:
+        op_blur(input_path, output_path, args.blur, meta, cfg, strip_meta)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
