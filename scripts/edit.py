@@ -98,6 +98,18 @@ def _check_encoder(name: str) -> None:
         )
 
 
+def _check_vidstab() -> None:
+    """Raise SystemExit if ffmpeg build lacks vidstab filters."""
+    r = _run(["ffmpeg", "-hide_banner", "-filters"], check=False)
+    missing = [f for f in ("vidstabdetect", "vidstabtransform") if f not in r.stdout]
+    if missing:
+        raise SystemExit(
+            f"[edit] vidstab filter(s) not available in this ffmpeg build: {', '.join(missing)}\n"
+            "Check: ffmpeg -filters | grep vidstab\n"
+            "To install: brew install ffmpeg  (macOS) or  apt install ffmpeg  (Ubuntu/Debian)"
+        )
+
+
 class EncodeConfig:
     """Output encoding parameters resolved from CLI flags."""
 
@@ -746,6 +758,33 @@ def op_boomerang(input_path: Path, output_path: Path, meta: dict,
     _concat_files([input_path, reversed_path], output_path, cfg, strip_meta)
 
 
+def op_stabilize(input_path: Path, output_path: Path,
+                 cfg: EncodeConfig, strip_meta: bool, work_dir: Path) -> None:
+    """Two-pass video stabilization via vidstab."""
+    _check_vidstab()
+    trf_path = work_dir / "transforms.trf"
+    safe_trf = str(trf_path).replace("\\", "/").replace("'", r"\'").replace(":", r"\:")
+
+    _status("stabilize pass 1/2: analyzing motion")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result='{safe_trf}'",
+              "-f", "null", "-"], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] stabilize pass 1 failed:\n{r.stderr}")
+    if not trf_path.exists():
+        raise SystemExit("[edit] stabilize pass 1 produced no transform file.")
+
+    _status("stabilize pass 2/2: applying transforms")
+    vf = f"vidstabtransform=input='{safe_trf}':smoothing=10,unsharp=5:5:0.8:3:3:0.4"
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", vf]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] stabilize pass 2 failed:\n{r.stderr}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -853,6 +892,10 @@ def main() -> int:
                     help="Repeat clip N times (N >= 2)")
     ap.add_argument("--boomerang", action="store_true",
                     help="Concat clip + reversed clip (forward then backward)")
+    ap.add_argument("--stabilize", action="store_true",
+                    help="Two-pass video stabilization (vidstabdetect + vidstabtransform). "
+                         "Requires ffmpeg built with libvidstab. "
+                         "Check: ffmpeg -filters | grep vidstab")
 
     # Output quality controls (global modifiers, not operations)
     ap.add_argument("--strip-metadata", action="store_true",
@@ -940,6 +983,7 @@ def main() -> int:
         args.reverse,
         args.loop is not None,
         args.boomerang,
+        args.stabilize,
     ])
 
     if op_count == 0:
@@ -948,7 +992,7 @@ def main() -> int:
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
                          "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
-                         "or --boomerang.")
+                         "or --boomerang, --stabilize.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -1079,6 +1123,9 @@ def main() -> int:
 
     elif args.boomerang:
         op_boomerang(input_path, output_path, meta, cfg, strip_meta, work_dir)
+
+    elif args.stabilize:
+        op_stabilize(input_path, output_path, cfg, strip_meta, work_dir)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
