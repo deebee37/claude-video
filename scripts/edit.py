@@ -820,6 +820,23 @@ def op_blur(input_path: Path, output_path: Path, region: str,
         raise SystemExit(f"[edit] blur failed:\n{r.stderr}")
 
 
+def op_normalize_audio(input_path: Path, output_path: Path,
+                       cfg: EncodeConfig, strip_meta: bool, meta: dict) -> None:
+    """Normalize audio loudness to EBU R128 (-16 LUFS). Video is stream-copied."""
+    if not meta.get("has_audio"):
+        raise SystemExit("[edit] normalize-audio requires an input with an audio stream.")
+    _status("normalizing audio loudness (EBU R128, -16 LUFS)")
+    cmd = ["ffmpeg", "-y", "-i", str(input_path),
+           "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+           "-c:v", "copy"]
+    cmd += _strip_flags(strip_meta)
+    cmd += cfg.audio_flags()
+    cmd += [str(output_path)]
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] normalize-audio failed:\n{r.stderr}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -934,6 +951,9 @@ def main() -> int:
     ap.add_argument("--blur", metavar="W:H:X:Y",
                     help="Blur a rectangular region for privacy (faces, plates, etc.). "
                          "Format: width:height:x:y (pixels, top-left origin).")
+    ap.add_argument("--normalize-audio", action="store_true",
+                    help="Normalize audio loudness to EBU R128 (-16 LUFS, -1.5 dBTP, LRA 11). "
+                         "Video is stream-copied unchanged. One-pass loudnorm.")
 
     # Output quality controls (global modifiers, not operations)
     ap.add_argument("--strip-metadata", action="store_true",
@@ -1023,6 +1043,7 @@ def main() -> int:
         args.boomerang,
         args.stabilize,
         args.blur is not None,
+        args.normalize_audio,
     ])
 
     if op_count == 0:
@@ -1031,7 +1052,7 @@ def main() -> int:
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
                          "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
-                         "or --boomerang, --stabilize, --blur.")
+                         "or --boomerang, --stabilize, --blur, --normalize-audio.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -1168,6 +1189,9 @@ def main() -> int:
 
     elif args.blur:
         op_blur(input_path, output_path, args.blur, meta, cfg, strip_meta)
+
+    elif args.normalize_audio:
+        op_normalize_audio(input_path, output_path, cfg, strip_meta, meta)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
