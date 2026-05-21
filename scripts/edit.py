@@ -837,6 +837,19 @@ def op_normalize_audio(input_path: Path, output_path: Path,
         raise SystemExit(f"[edit] normalize-audio failed:\n{r.stderr}")
 
 
+def op_sharpen(input_path: Path, output_path: Path,
+               cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Sharpen video using unsharp mask."""
+    _status("sharpening (unsharp mask)")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", "unsharp=5:5:0.8:3:3:0.4"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] sharpen failed:\n{r.stderr}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -954,6 +967,8 @@ def main() -> int:
     ap.add_argument("--normalize-audio", action="store_true",
                     help="Normalize audio loudness to EBU R128 (-16 LUFS, -1.5 dBTP, LRA 11). "
                          "Video is stream-copied unchanged. One-pass loudnorm.")
+    ap.add_argument("--sharpen", action="store_true",
+                    help="Sharpen video using unsharp mask (luma 5x5 +0.8, chroma 3x3 +0.4).")
 
     # Output quality controls (global modifiers, not operations)
     ap.add_argument("--strip-metadata", action="store_true",
@@ -1044,6 +1059,7 @@ def main() -> int:
         args.stabilize,
         args.blur is not None,
         args.normalize_audio,
+        args.sharpen,
     ])
 
     if op_count == 0:
@@ -1052,7 +1068,7 @@ def main() -> int:
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
                          "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
-                         "or --boomerang, --stabilize, --blur, --normalize-audio.")
+                         "or --boomerang, --stabilize, --blur, --normalize-audio, --sharpen.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -1192,6 +1208,9 @@ def main() -> int:
 
     elif args.normalize_audio:
         op_normalize_audio(input_path, output_path, cfg, strip_meta, meta)
+
+    elif args.sharpen:
+        op_sharpen(input_path, output_path, cfg, strip_meta)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
