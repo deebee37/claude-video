@@ -245,6 +245,9 @@ def op_concat(inputs: list[Path], output_path: Path,
 def op_speed(input_path: Path, output_path: Path, factor: float,
              cfg: EncodeConfig, strip_meta: bool) -> None:
     """Change playback speed. Factor > 1 = faster, < 1 = slower."""
+    if factor <= 0:
+        raise SystemExit("[edit] --speed must be a positive number. "
+                         "Reverse playback is not supported by --speed.")
     _status(f"changing speed to {factor}x")
     pts = 1.0 / factor
 
@@ -434,12 +437,15 @@ def op_overlay(input_path: Path, overlay_path: Path, output_path: Path,
                cfg: EncodeConfig, strip_meta: bool) -> None:
     """Overlay a second video on top of the base video."""
     _status(f"overlaying {overlay_path.name} at ({x},{y})")
-    scale_filter = f"[1]scale={scale}:-2[ov];" if scale else "[1]copy[ov];"
-    vf = f"{scale_filter}[0][ov]overlay={x}:{y}"
+    if scale:
+        vf = f"[1:v]scale={scale}:-2[ov];[0:v][ov]overlay=x={x}:y={y}:format=auto:eof_action=pass:repeatlast=0[v]"
+    else:
+        vf = f"[0:v][1:v]overlay=x={x}:y={y}:format=auto:eof_action=pass:repeatlast=0[v]"
     r = _run(["ffmpeg", "-y",
               "-i", str(input_path),
               "-i", str(overlay_path),
-              "-filter_complex", vf]
+              "-filter_complex", vf,
+              "-map", "[v]", "-map", "0:a?"]
              + _strip_flags(strip_meta)
              + cfg.video_flags() + cfg.audio_copy()
              + [str(output_path)], check=False)
