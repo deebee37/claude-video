@@ -60,6 +60,11 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def _require_tool(name: str) -> None:
+    if not shutil.which(name):
+        raise SystemExit(f"[smoke] '{name}' not found on PATH. Install ffmpeg and retry.")
+
+
 def _ffprobe(path: Path) -> dict:
     r = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json",
@@ -95,6 +100,8 @@ def _check(path: Path,
         m = _ffprobe(path)
     except ValueError as e:
         return str(e)
+    if m["width"] is None:
+        return "output has no video stream"
     if min_dur is not None and m["duration"] < min_dur:
         return f"duration {m['duration']:.2f}s < expected min {min_dur:.2f}s"
     if max_dur is not None and m["duration"] > max_dur:
@@ -124,11 +131,14 @@ def run_ok(name: str, cmd: list[str], out: Path,
     return True
 
 
-def run_fail(name: str, cmd: list[str]) -> bool:
-    """Run cmd, expect a non-zero exit code."""
+def run_fail(name: str, cmd: list[str], out: Path | None = None) -> bool:
+    """Run cmd, expect a non-zero exit code. If out is given, assert no artifact was left."""
     r = _run(cmd)
     if r.returncode == 0:
         _fail(name, "expected failure but got exit 0")
+        return False
+    if out is not None and out.exists() and out.stat().st_size > 0:
+        _fail(name, f"exited {r.returncode} as expected but left a non-empty output: {out.name}")
         return False
     _pass(name, f"correctly exited {r.returncode}")
     return True
@@ -176,6 +186,14 @@ def _make_media(d: Path) -> tuple[Path, Path, Path]:
 # Test suite
 # ---------------------------------------------------------------------------
 
+KNOWN_TESTS: frozenset[str] = frozenset({
+    "trim", "cut", "crop", "resize", "rotate", "concat", "speed",
+    "overlay", "pip", "side-by-side", "stabilize", "look",
+    "normalize-audio", "sharpen", "watermark-text", "watermark-image",
+    "speed-zero", "speed-negative", "normalize-audio-no-audio", "watermark-both",
+})
+
+
 def run_all(d: Path, only: set[str] | None) -> None:
     clip_a, clip_s, logo = _make_media(d)
     print(f"  media: {clip_a.name}, {clip_s.name}, {logo.name}\n")
@@ -202,14 +220,14 @@ def run_all(d: Path, only: set[str] | None) -> None:
         out = d / "crop.mp4"
         run_ok("crop",
                EDIT + [str(clip_a), "--crop", "160:120:80:60", "--output", str(out)] + QUALITY,
-               out, w=160, h=120)
+               out, min_dur=8.0, w=160, h=120)
 
     # -- resize ---------------------------------------------------------------
     if want("resize"):
         out = d / "resize.mp4"
         run_ok("resize",
                EDIT + [str(clip_a), "--resize", "160x120", "--output", str(out)] + QUALITY,
-               out, w=160, h=120)
+               out, min_dur=8.0, w=160, h=120)
 
     # -- rotate ---------------------------------------------------------------
     if want("rotate"):
@@ -217,7 +235,7 @@ def run_all(d: Path, only: set[str] | None) -> None:
         # 320x240 rotated 90° → 240x320
         run_ok("rotate",
                EDIT + [str(clip_a), "--rotate", "90", "--output", str(out)] + QUALITY,
-               out, w=240, h=320)
+               out, min_dur=8.0, w=240, h=320)
 
     # -- concat ---------------------------------------------------------------
     if want("concat"):
@@ -315,26 +333,31 @@ def run_all(d: Path, only: set[str] | None) -> None:
     # -------------------------------------------------------------------------
 
     if want("speed-zero"):
+        _out = d / "_no_speed_zero.mp4"
         run_fail("speed-zero",
-                 EDIT + [str(clip_a), "--speed", "0",
-                         "--output", str(d / "_no_speed_zero.mp4")] + QUALITY)
+                 EDIT + [str(clip_a), "--speed", "0", "--output", str(_out)] + QUALITY,
+                 out=_out)
 
     if want("speed-negative"):
+        _out = d / "_no_speed_neg.mp4"
         run_fail("speed-negative",
-                 EDIT + [str(clip_a), "--speed", "-1",
-                         "--output", str(d / "_no_speed_neg.mp4")] + QUALITY)
+                 EDIT + [str(clip_a), "--speed", "-1", "--output", str(_out)] + QUALITY,
+                 out=_out)
 
     if want("normalize-audio-no-audio"):
+        _out = d / "_no_norm_silent.mp4"
         run_fail("normalize-audio-no-audio",
-                 EDIT + [str(clip_s), "--normalize-audio",
-                         "--output", str(d / "_no_norm_silent.mp4")] + QUALITY)
+                 EDIT + [str(clip_s), "--normalize-audio", "--output", str(_out)] + QUALITY,
+                 out=_out)
 
     if want("watermark-both"):
+        _out = d / "_no_wm_both.mp4"
         run_fail("watermark-both",
                  EDIT + [str(clip_a),
                          "--watermark-text", "Test",
                          "--watermark-image", str(logo),
-                         "--output", str(d / "_no_wm_both.mp4")] + QUALITY)
+                         "--output", str(_out)] + QUALITY,
+                 out=_out)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +372,17 @@ def main() -> int:
                     help="Run only the named tests, e.g. --only trim crop resize.")
     args = ap.parse_args()
 
+    _require_tool("ffmpeg")
+    _require_tool("ffprobe")
+
     only = set(args.only) if args.only else None
+    if only:
+        unknown = only - KNOWN_TESTS
+        if unknown:
+            raise SystemExit(
+                f"[smoke] Unknown test name(s): {', '.join(sorted(unknown))}\n"
+                f"Valid names: {', '.join(sorted(KNOWN_TESTS))}"
+            )
 
     tmp = Path(tempfile.mkdtemp(prefix="smoke-edit-"))
     print(f"\n[smoke] temp dir: {tmp}")
