@@ -245,6 +245,9 @@ def op_concat(inputs: list[Path], output_path: Path,
 def op_speed(input_path: Path, output_path: Path, factor: float,
              cfg: EncodeConfig, strip_meta: bool) -> None:
     """Change playback speed. Factor > 1 = faster, < 1 = slower."""
+    if factor <= 0:
+        raise SystemExit("[edit] --speed must be a positive number. "
+                         "Reverse playback is not supported by --speed.")
     _status(f"changing speed to {factor}x")
     pts = 1.0 / factor
 
@@ -434,12 +437,15 @@ def op_overlay(input_path: Path, overlay_path: Path, output_path: Path,
                cfg: EncodeConfig, strip_meta: bool) -> None:
     """Overlay a second video on top of the base video."""
     _status(f"overlaying {overlay_path.name} at ({x},{y})")
-    scale_filter = f"[1]scale={scale}:-2[ov];" if scale else "[1]copy[ov];"
-    vf = f"{scale_filter}[0][ov]overlay={x}:{y}"
+    if scale:
+        vf = f"[1:v]scale={scale}:-2[ov];[0:v][ov]overlay=x={x}:y={y}:format=auto:eof_action=pass:repeatlast=0[v]"
+    else:
+        vf = f"[0:v][1:v]overlay=x={x}:y={y}:format=auto:eof_action=pass:repeatlast=0[v]"
     r = _run(["ffmpeg", "-y",
               "-i", str(input_path),
               "-i", str(overlay_path),
-              "-filter_complex", vf]
+              "-filter_complex", vf,
+              "-map", "[v]", "-map", "0:a?"]
              + _strip_flags(strip_meta)
              + cfg.video_flags() + cfg.audio_copy()
              + [str(output_path)], check=False)
@@ -820,6 +826,91 @@ def op_blur(input_path: Path, output_path: Path, region: str,
         raise SystemExit(f"[edit] blur failed:\n{r.stderr}")
 
 
+def op_normalize_audio(input_path: Path, output_path: Path,
+                       cfg: EncodeConfig, strip_meta: bool, meta: dict) -> None:
+    """Normalize audio loudness to EBU R128 (-16 LUFS). Video is stream-copied."""
+    if not meta.get("has_audio"):
+        raise SystemExit("[edit] normalize-audio requires an input with an audio stream.")
+    _status("normalizing audio loudness (EBU R128, -16 LUFS)")
+    cmd = ["ffmpeg", "-y", "-i", str(input_path),
+           "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+           "-c:v", "copy"]
+    cmd += _strip_flags(strip_meta)
+    cmd += cfg.audio_flags()
+    cmd += [str(output_path)]
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] normalize-audio failed:\n{r.stderr}")
+
+
+def op_sharpen(input_path: Path, output_path: Path,
+               cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Sharpen video using unsharp mask."""
+    _status("sharpening (unsharp mask)")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", "unsharp=5:5:0.8:3:3:0.4"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] sharpen failed:\n{r.stderr}")
+
+
+def op_watermark(input_path: Path, output_path: Path,
+                 text: str | None, image_path: Path | None,
+                 position: str, opacity: float, padding: int,
+                 scale: float, font_size: int,
+                 meta: dict, cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Burn a text or image/logo watermark onto the video."""
+    _pos_text = {
+        "top-left":     (f"{padding}",             f"{padding}"),
+        "top-right":    (f"w-tw-{padding}",         f"{padding}"),
+        "bottom-left":  (f"{padding}",             f"h-th-{padding}"),
+        "bottom-right": (f"w-tw-{padding}",         f"h-th-{padding}"),
+        "center":       ("(w-tw)/2",               "(h-th)/2"),
+    }
+    _pos_overlay = {
+        "top-left":     (f"{padding}",                    f"{padding}"),
+        "top-right":    (f"main_w-overlay_w-{padding}",   f"{padding}"),
+        "bottom-left":  (f"{padding}",                    f"main_h-overlay_h-{padding}"),
+        "bottom-right": (f"main_w-overlay_w-{padding}",   f"main_h-overlay_h-{padding}"),
+        "center":       ("(main_w-overlay_w)/2",          "(main_h-overlay_h)/2"),
+    }
+
+    if text is not None:
+        _status(f"adding text watermark: '{text}' at {position}")
+        safe = text.replace("'", "\\'").replace(":", "\\:").replace("%", "\\%")
+        x, y = _pos_text[position]
+        vf = (f"drawtext=text='{safe}'"
+              f":x={x}:y={y}"
+              f":fontsize={font_size}"
+              f":fontcolor=white@{opacity:.2f}"
+              f":shadowcolor=black@{opacity:.2f}:shadowx=1:shadowy=1")
+        r = _run(["ffmpeg", "-y", "-i", str(input_path), "-vf", vf]
+                 + _strip_flags(strip_meta)
+                 + cfg.video_flags() + cfg.audio_copy()
+                 + [str(output_path)], check=False)
+        if r.returncode != 0:
+            raise SystemExit(f"[edit] text watermark failed:\n{r.stderr}")
+    else:
+        _status(f"adding image watermark: {image_path.name} at {position}")
+        logo_w = max(2, int(meta["width"] * scale) & ~1)
+        x, y = _pos_overlay[position]
+        fc = (f"[1:v]scale={logo_w}:-2,format=rgba,"
+              f"colorchannelmixer=aa={opacity:.4f}[wm];"
+              f"[0:v][wm]overlay=x={x}:y={y}:format=auto[v]")
+        r = _run(["ffmpeg", "-y",
+                  "-i", str(input_path),
+                  "-i", str(image_path),
+                  "-filter_complex", fc,
+                  "-map", "[v]", "-map", "0:a?"]
+                 + _strip_flags(strip_meta)
+                 + cfg.video_flags() + cfg.audio_copy()
+                 + [str(output_path)], check=False)
+        if r.returncode != 0:
+            raise SystemExit(f"[edit] image watermark failed:\n{r.stderr}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -934,6 +1025,29 @@ def main() -> int:
     ap.add_argument("--blur", metavar="W:H:X:Y",
                     help="Blur a rectangular region for privacy (faces, plates, etc.). "
                          "Format: width:height:x:y (pixels, top-left origin).")
+    ap.add_argument("--normalize-audio", action="store_true",
+                    help="Normalize audio loudness to EBU R128 (-16 LUFS, -1.5 dBTP, LRA 11). "
+                         "Video is stream-copied unchanged. One-pass loudnorm.")
+    ap.add_argument("--sharpen", action="store_true",
+                    help="Sharpen video using unsharp mask (luma 5x5 +0.8, chroma 3x3 +0.4).")
+
+    # Watermark
+    ap.add_argument("--watermark-text", metavar="TEXT",
+                    help="Burn text onto video as a watermark.")
+    ap.add_argument("--watermark-image", metavar="FILE",
+                    help="Burn an image/logo onto video as a watermark (.png or .jpg).")
+    ap.add_argument("--watermark-position",
+                    choices=["top-left", "top-right", "bottom-left", "bottom-right", "center"],
+                    default="bottom-right",
+                    help="Watermark position (default: bottom-right).")
+    ap.add_argument("--watermark-opacity", type=float, default=0.65,
+                    help="Watermark opacity, 0.0–1.0 exclusive/inclusive (default: 0.65).")
+    ap.add_argument("--watermark-padding", type=int, default=24,
+                    help="Padding from edge in pixels (default: 24).")
+    ap.add_argument("--watermark-scale", type=float, default=0.15,
+                    help="Image watermark width as fraction of video width (default: 0.15).")
+    ap.add_argument("--watermark-font-size", type=int, default=36,
+                    help="Font size for text watermark (default: 36).")
 
     # Output quality controls (global modifiers, not operations)
     ap.add_argument("--strip-metadata", action="store_true",
@@ -1023,6 +1137,9 @@ def main() -> int:
         args.boomerang,
         args.stabilize,
         args.blur is not None,
+        args.normalize_audio,
+        args.sharpen,
+        args.watermark_text is not None or args.watermark_image is not None,
     ])
 
     if op_count == 0:
@@ -1031,7 +1148,8 @@ def main() -> int:
                          "--resize, --rotate, --crop, --overlay, --side-by-side, "
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
                          "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
-                         "or --boomerang, --stabilize, --blur.")
+                         "or --boomerang, --stabilize, --blur, --normalize-audio, --sharpen, "
+                         "--watermark-text, --watermark-image.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -1168,6 +1286,36 @@ def main() -> int:
 
     elif args.blur:
         op_blur(input_path, output_path, args.blur, meta, cfg, strip_meta)
+
+    elif args.normalize_audio:
+        op_normalize_audio(input_path, output_path, cfg, strip_meta, meta)
+
+    elif args.sharpen:
+        op_sharpen(input_path, output_path, cfg, strip_meta)
+
+    elif args.watermark_text is not None or args.watermark_image is not None:
+        if args.watermark_text is not None and args.watermark_image is not None:
+            raise SystemExit("[edit] Use --watermark-text or --watermark-image, not both.")
+        if not (0 < args.watermark_opacity <= 1.0):
+            raise SystemExit(f"[edit] --watermark-opacity must be > 0 and <= 1. Got: {args.watermark_opacity}")
+        if args.watermark_padding < 0:
+            raise SystemExit(f"[edit] --watermark-padding must be >= 0. Got: {args.watermark_padding}")
+        if args.watermark_scale <= 0:
+            raise SystemExit(f"[edit] --watermark-scale must be > 0. Got: {args.watermark_scale}")
+        wm_text = args.watermark_text
+        if wm_text is not None and not wm_text.strip():
+            raise SystemExit("[edit] --watermark-text must not be empty.")
+        wm_image = None
+        if args.watermark_image is not None:
+            wm_image = Path(args.watermark_image).expanduser().resolve()
+            if not wm_image.exists():
+                raise SystemExit(f"[edit] Watermark image not found: {wm_image}")
+        op_watermark(input_path, output_path,
+                     wm_text, wm_image,
+                     args.watermark_position, args.watermark_opacity,
+                     args.watermark_padding, args.watermark_scale,
+                     args.watermark_font_size,
+                     meta, cfg, strip_meta)
 
     # -----------------------------------------------------------------------
     # Verify output and gather metadata
