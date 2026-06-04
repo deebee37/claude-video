@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-smoke_edit.py — smoke and regression tests for scripts/edit.py.
+smoke_edit.py -- smoke and regression tests for scripts/edit.py.
 
 Generates tiny synthetic media with ffmpeg, then runs each CLI operation
 and verifies outputs. Takes ~30-90 seconds depending on hardware.
@@ -36,7 +36,7 @@ _results: list[tuple[str, bool, str]] = []  # (name, passed, note)
 
 def _pass(name: str, note: str = "") -> None:
     _results.append((name, True, note))
-    tag = f"  SKIP  {name}  — {note}" if note.startswith("SKIP") else f"  PASS  {name}"
+    tag = f"  SKIP  {name}  -- {note}" if note.startswith("SKIP") else f"  PASS  {name}"
     if note and not note.startswith("SKIP"):
         tag += f"  ({note})"
     print(tag)
@@ -44,12 +44,12 @@ def _pass(name: str, note: str = "") -> None:
 
 def _fail(name: str, reason: str) -> None:
     _results.append((name, False, reason))
-    print(f"  FAIL  {name}  — {reason}")
+    print(f"  FAIL  {name}  -- {reason}")
 
 
 def _skip(name: str, reason: str) -> None:
     _results.append((name, True, f"SKIP: {reason}"))
-    print(f"  SKIP  {name}  — {reason}")
+    print(f"  SKIP  {name}  -- {reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ def run_all(d: Path, only: set[str] | None) -> None:
     # -- rotate ---------------------------------------------------------------
     if want("rotate"):
         out = d / "rotate.mp4"
-        # 320x240 rotated 90° → 240x320
+        # 320x240 rotated 90 deg -> 240x320
         run_ok("rotate",
                EDIT + [str(clip_a), "--rotate", "90", "--output", str(out)] + QUALITY,
                out, min_dur=8.0, w=240, h=320)
@@ -272,7 +272,7 @@ def run_all(d: Path, only: set[str] | None) -> None:
     # -- side-by-side ---------------------------------------------------------
     if want("side-by-side"):
         out = d / "sbs.mp4"
-        # two 320x240 clips → 640x240
+        # two 320x240 clips -> 640x240
         run_ok("side-by-side",
                EDIT + [str(clip_a), "--side-by-side", str(clip_a),
                        "--output", str(out)] + QUALITY,
@@ -404,7 +404,7 @@ def main() -> int:
     failed  = sum(1 for _, ok, _ in _results if not ok)
     total   = len(_results)
 
-    print(f"\n[smoke] {total} tests — {passed} passed, {skipped} skipped, {failed} failed")
+    print(f"\n[smoke] {total} tests -- {passed} passed, {skipped} skipped, {failed} failed")
     if failed:
         failing = [name for name, ok, _ in _results if not ok]
         print(f"[smoke] FAILED: {', '.join(failing)}")
