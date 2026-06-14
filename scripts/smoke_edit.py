@@ -189,7 +189,7 @@ def _make_media(d: Path) -> tuple[Path, Path, Path]:
 KNOWN_TESTS: frozenset[str] = frozenset({
     "trim", "cut", "crop", "resize", "rotate", "concat", "speed",
     "overlay", "pip", "side-by-side", "stabilize", "look",
-    "normalize-audio", "sharpen", "watermark-text", "watermark-image",
+    "normalize-audio", "sharpen", "denoise", "watermark-text", "watermark-image",
     "speed-zero", "speed-negative", "normalize-audio-no-audio", "watermark-both",
 })
 
@@ -308,6 +308,13 @@ def run_all(d: Path, only: set[str] | None) -> None:
         out = d / "sharpen.mp4"
         run_ok("sharpen",
                EDIT + [str(clip_a), "--sharpen", "--output", str(out)] + QUALITY,
+               out, min_dur=8.0)
+
+    # -- denoise ----------------------------------------------------------------
+    if want("denoise"):
+        out = d / "denoise.mp4"
+        run_ok("denoise",
+               EDIT + [str(clip_a), "--denoise", "--output", str(out)] + QUALITY,
                out, min_dur=8.0)
 
     # -- watermark-text -------------------------------------------------------
