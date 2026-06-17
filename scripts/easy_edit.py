@@ -12,6 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import platform
 import re
 import shlex
@@ -286,6 +287,59 @@ def choose_output_suffix(video: Path) -> str:
     return ".mp4"
 
 
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s >= 3600:
+        return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def probe_video(path: Path) -> str | None:
+    """Return a short info string like '00:02:35, 1920x1080, 30fps, has audio'."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format=duration:stream=width,height,r_frame_rate,codec_type",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout)
+    except Exception:
+        return None
+
+    parts: list[str] = []
+
+    dur = data.get("format", {}).get("duration")
+    if dur:
+        try:
+            parts.append(_fmt_duration(float(dur)))
+        except ValueError:
+            pass
+
+    has_audio = False
+    for s in data.get("streams", []):
+        if s.get("codec_type") == "video" and not any("x" in p for p in parts):
+            w, h = s.get("width"), s.get("height")
+            if w and h:
+                parts.append(f"{w}x{h}")
+            fps_str = s.get("r_frame_rate", "")
+            if "/" in fps_str:
+                try:
+                    num, den = fps_str.split("/")
+                    fps = round(int(num) / int(den))
+                    if fps > 0:
+                        parts.append(f"{fps}fps")
+                except (ValueError, ZeroDivisionError):
+                    pass
+        if s.get("codec_type") == "audio":
+            has_audio = True
+
+    parts.append("has audio" if has_audio else "no audio")
+    return ", ".join(parts) if len(parts) > 1 else None
+
+
 def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
@@ -381,6 +435,10 @@ def main() -> int:
                 "Pick a video",
             )
             video = videos[idx]
+
+            info = probe_video(video)
+            if info:
+                print(f"\n  {video.name} — {info}")
 
             op_idx = pick_from_list(
                 [op["name"] for op in OPERATIONS],
