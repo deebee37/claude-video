@@ -27,6 +27,8 @@ With Claude Video `/watch` you can paste a URL or a local path, ask a question, 
 /watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
 ```
 
+**Want to edit videos locally?** See [QUICKSTART.md](QUICKSTART.md) — a beginner-friendly menu for trimming, resizing, rotating, and more.
+
 ## Why this exists
 
 I built this because I'm constantly using video to keep up with content. If I see a YouTube video that's blowing up, I want to know how the creator structured the hook — what's on screen in the first 3 seconds, what they said, why it worked. That used to mean watching it myself with a notepad. Now I just paste the URL and ask.
