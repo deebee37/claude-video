@@ -14,3 +14,9 @@ htmlcov/
 
 # local Claude Code settings
 .claude/settings.local.json
+
+# easy_edit: user media files (keep .gitkeep tracked)
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
