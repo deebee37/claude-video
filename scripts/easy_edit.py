@@ -299,7 +299,7 @@ def probe_video(path: Path) -> str | None:
     try:
         r = subprocess.run(
             ["ffprobe", "-v", "error",
-             "-show_entries", "format=duration:stream=width,height,r_frame_rate,codec_type",
+             "-show_entries", "format=duration:stream=width,height,avg_frame_rate,r_frame_rate,codec_type",
              "-of", "json", str(path)],
             capture_output=True, text=True, timeout=10,
         )
@@ -324,7 +324,7 @@ def probe_video(path: Path) -> str | None:
             w, h = s.get("width"), s.get("height")
             if w and h:
                 parts.append(f"{w}x{h}")
-            fps_str = s.get("r_frame_rate", "")
+            fps_str = s.get("avg_frame_rate") or s.get("r_frame_rate", "")
             if "/" in fps_str:
                 try:
                     num, den = fps_str.split("/")
