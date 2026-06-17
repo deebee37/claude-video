@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -36,7 +37,7 @@ OPERATIONS: list[dict] = [
         "key": "trim",
         "flag": "--trim",
         "prompts": [
-            {"label": "Start time (SS, MM:SS, or HH:MM:SS)", "validate": "time"},
+            {"label": "Start time (SS, MM:SS, or HH:MM:SS)", "validate": "time_no_end"},
             {"label": "End time (SS, MM:SS, HH:MM:SS, or 'end')", "validate": "time"},
         ],
     },
@@ -122,30 +123,26 @@ OPERATIONS: list[dict] = [
 # Validation helpers
 # ---------------------------------------------------------------------------
 
+def _is_clock(value: str) -> bool:
+    """True for a non-negative SS / MM:SS / HH:MM:SS timestamp."""
+    parts = value.strip().split(":")
+    if len(parts) > 3:
+        return False
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return False
+    return all(n >= 0 for n in nums)
+
+
 def _validate_time(value: str) -> bool:
     if value.strip().lower() == "end":
         return True
-    parts = value.strip().split(":")
-    if len(parts) > 3:
-        return False
-    try:
-        for p in parts:
-            float(p)
-        return True
-    except ValueError:
-        return False
+    return _is_clock(value)
 
 
 def _validate_time_no_end(value: str) -> bool:
-    parts = value.strip().split(":")
-    if len(parts) > 3:
-        return False
-    try:
-        for p in parts:
-            float(p)
-        return True
-    except ValueError:
-        return False
+    return _is_clock(value)
 
 
 def _validate_size(value: str) -> bool:
@@ -274,6 +271,21 @@ def prompt_value(label: str, validate_type: str) -> str:
         print(f"    Invalid. {hint}")
 
 
+def choose_output_suffix(video: Path) -> str:
+    """Pick a safe output container for the easy runner.
+
+    edit.py re-encodes video to h264 but some operations copy audio
+    (resize, rotate, sharpen, …).  WebM sources often carry Vorbis audio
+    which MP4 cannot mux, so we use MKV — it accepts any codec combo.
+    """
+    src = video.suffix.lower()
+    if src == ".webm":
+        return ".mkv"
+    if src in (".mp4", ".mov", ".mkv"):
+        return video.suffix
+    return ".mp4"
+
+
 def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
@@ -288,16 +300,48 @@ def build_command(video: Path, op: dict, values: list[str],
     return cmd
 
 
+_ERROR_HINTS = ("error", "invalid", "not supported", "only ", "could not",
+                "no such", "permission", "unable", "cannot", "failed")
+
+# edit.py status lines we never want to surface as the error summary.
+_STATUS_PREFIXES = ("working dir:", "input:")
+
+
 def run_edit(cmd: list[str]) -> tuple[bool, str]:
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode == 0:
         return True, r.stdout
-    lines = [ln for ln in r.stderr.splitlines() if "[edit]" in ln]
-    if lines:
-        msg = lines[-1].split("[edit]", 1)[-1].strip()
-    else:
-        msg = r.stderr.strip()[-300:] if r.stderr else f"exit code {r.returncode}"
-    return False, msg
+    stderr = r.stderr or ""
+    # edit.py reports the actual error as the last non-status "[edit]" line
+    # (e.g. "[edit] normalize-audio requires an input with an audio stream."),
+    # while raw ffmpeg/ffprobe output appears on lines without the tag.
+    edit_msgs: list[str] = []
+    detail_lines: list[str] = []
+    for ln in stderr.splitlines():
+        if not ln.strip():
+            continue
+        if "[edit]" in ln:
+            msg = ln.split("[edit]", 1)[-1].strip()
+            if not msg.lower().startswith(_STATUS_PREFIXES):
+                edit_msgs.append(msg)
+        else:
+            detail_lines.append(ln.strip())
+
+    parts: list[str] = []
+    if edit_msgs:
+        parts.append(edit_msgs[-1])
+    # Add the underlying ffmpeg/ffprobe reason for extra context.
+    reason = ""
+    for ln in detail_lines:
+        if any(k in ln.lower() for k in _ERROR_HINTS):
+            reason = ln
+    if not reason and detail_lines:
+        reason = detail_lines[-1]
+    if reason and reason not in " ".join(parts):
+        parts.append(reason)
+    if not parts:
+        parts.append(f"exit code {r.returncode}")
+    return False, " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -324,68 +368,90 @@ def main() -> int:
     ensure_dirs()
 
     last_failed = False
-    while True:
-        videos = find_videos()
-        if not videos:
-            print(f"No video files found in:\n  {INPUT_DIR}\n")
-            print("Drop a .mp4, .mov, .mkv, or .webm file into that folder and try again.")
-            return 1
+    try:
+        while True:
+            videos = find_videos()
+            if not videos:
+                print(f"No video files found in:\n  {INPUT_DIR}\n")
+                print("Drop a .mp4, .mov, .mkv, or .webm file into that folder and try again.")
+                return 1
 
-        idx = pick_from_list(
-            [f"{v.name}  ({v.stat().st_size / 1_048_576:.1f} MB)" for v in videos],
-            "Pick a video",
-        )
-        video = videos[idx]
+            idx = pick_from_list(
+                [f"{v.name}  ({v.stat().st_size / 1_048_576:.1f} MB)" for v in videos],
+                "Pick a video",
+            )
+            video = videos[idx]
 
-        op_idx = pick_from_list(
-            [op["name"] for op in OPERATIONS],
-            "Pick an operation",
-        )
-        op = OPERATIONS[op_idx]
+            op_idx = pick_from_list(
+                [op["name"] for op in OPERATIONS],
+                "Pick an operation",
+            )
+            op = OPERATIONS[op_idx]
 
-        values: list[str] = []
-        if op["prompts"]:
-            print(f"\n  {op['name']}:")
-        for p in op["prompts"]:
-            values.append(prompt_value(p["label"], p["validate"]))
+            values: list[str] = []
+            if op["prompts"]:
+                print(f"\n  {op['name']}:")
+            for p in op["prompts"]:
+                values.append(prompt_value(p["label"], p["validate"]))
 
-        output = build_output_path(video.stem, op["key"], video.suffix or ".mp4")
+            suffix = choose_output_suffix(video)
+            if video.suffix.lower() == ".webm" and suffix != ".webm":
+                print(f"\nWebM input detected. Saving as {suffix} to preserve audio compatibility.")
+            output = build_output_path(video.stem, op["key"], suffix)
 
-        uses_intermediates = op["key"] in ("cut", "concat")
-        if uses_intermediates:
-            tmp_dir = Path(tempfile.mkdtemp(prefix="easy-edit-"))
-            tmp_output = tmp_dir / output.name
-            cmd = build_command(video, op, values, tmp_output)
-        else:
-            tmp_dir = None
-            cmd = build_command(video, op, values, output)
+            uses_intermediates = op["key"] in ("cut", "concat")
+            if uses_intermediates:
+                tmp_dir = Path(tempfile.mkdtemp(prefix="easy-edit-"))
+                tmp_output = tmp_dir / output.name
+                cmd = build_command(video, op, values, tmp_output)
+            else:
+                tmp_dir = None
+                tmp_output = None
+                cmd = build_command(video, op, values, output)
 
-        print(f"\nCommand:\n  {' '.join(cmd)}\n")
-        confirm = input("Run this? (y/n): ").strip().lower()
-        if confirm != "y":
-            print("Cancelled.\n")
+            print(f"\nCommand:\n  {shlex.join(cmd)}\n")
+            confirm = input("Run this? (y/n): ").strip().lower()
+            if confirm != "y":
+                print("Cancelled.\n")
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                continue
+
+            output_existed = output.exists()
+            print("Running...")
+            success, message = run_edit(cmd)
+
+            # For temp-dir operations, promote the finished file into output/.
+            if success and uses_intermediates:
+                if tmp_output.exists() and tmp_output.stat().st_size > 0:
+                    shutil.move(str(tmp_output), str(output))
+                else:
+                    success = False
+                    message = "the edit finished but produced no output file"
             if tmp_dir:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-            continue
 
-        print("Running...")
-        success, message = run_edit(cmd)
+            # A zero-byte or missing result is a failure, even on exit code 0.
+            if success and (not output.exists() or output.stat().st_size == 0):
+                success = False
+                message = "the edit finished but produced no output file"
 
-        if success:
-            if tmp_dir:
-                shutil.move(str(tmp_output), str(output))
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            last_failed = False
-            print(f"\nDone! Output saved to:\n  {output}\n")
-        else:
-            if tmp_dir:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            last_failed = True
-            print(f"\nSomething went wrong:\n  {message}\n")
+            if success:
+                last_failed = False
+                print(f"\nDone! Output saved to:\n  {output}\n")
+            else:
+                if output.exists() and not output_existed:
+                    output.unlink()
+                last_failed = True
+                print(f"\nSomething went wrong:\n  {message}\n")
 
-        again = input("Edit another? (y/n): ").strip().lower()
-        if again != "y":
-            break
+            again = input("Edit another? (y/n): ").strip().lower()
+            if again != "y":
+                break
+    except EOFError:
+        # End of input (Ctrl+D or a piped run); stop cleanly but keep the
+        # failure status from the last edit so callers see a non-zero exit.
+        print()
 
     print("Bye!")
     return 1 if last_failed else 0
