@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -44,8 +45,8 @@ OPERATIONS: list[dict] = [
         "key": "cut",
         "flag": "--cut",
         "prompts": [
-            {"label": "Start of section to remove (SS, MM:SS, or HH:MM:SS)", "validate": "time"},
-            {"label": "End of section to remove (SS, MM:SS, HH:MM:SS, or 'end')", "validate": "time"},
+            {"label": "Start of section to remove (SS, MM:SS, or HH:MM:SS)", "validate": "time_no_end"},
+            {"label": "End of section to remove (SS, MM:SS, or HH:MM:SS)", "validate": "time_no_end"},
         ],
     },
     {
@@ -135,6 +136,18 @@ def _validate_time(value: str) -> bool:
         return False
 
 
+def _validate_time_no_end(value: str) -> bool:
+    parts = value.strip().split(":")
+    if len(parts) > 3:
+        return False
+    try:
+        for p in parts:
+            float(p)
+        return True
+    except ValueError:
+        return False
+
+
 def _validate_size(value: str) -> bool:
     m = re.fullmatch(r"(\d+)x(\d+)", value.strip(), re.IGNORECASE)
     if not m:
@@ -185,6 +198,7 @@ def _resolve_filepath(value: str) -> str:
 
 _VALIDATORS: dict[str, tuple] = {
     "time":           (_validate_time, "Enter a time like 30, 1:30, or 0:01:30 (or 'end')"),
+    "time_no_end":    (_validate_time_no_end, "Enter a time like 30, 1:30, or 0:01:30"),
     "size":           (_validate_size, "Enter size as WxH, e.g. 1920x1080"),
     "rotation":       (_validate_rotation, "Enter 90, 180, or 270"),
     "positive_float": (_validate_positive_float, "Enter a positive number, e.g. 2.0"),
@@ -260,10 +274,10 @@ def prompt_value(label: str, validate_type: str) -> str:
         print(f"    Invalid. {hint}")
 
 
-def build_output_path(input_stem: str, op_key: str) -> Path:
+def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
-    return OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}.mp4"
+    return OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}{suffix}"
 
 
 def build_command(video: Path, op: dict, values: list[str],
@@ -309,6 +323,7 @@ def main() -> int:
     check_prerequisites()
     ensure_dirs()
 
+    last_failed = False
     while True:
         videos = find_videos()
         if not videos:
@@ -334,21 +349,38 @@ def main() -> int:
         for p in op["prompts"]:
             values.append(prompt_value(p["label"], p["validate"]))
 
-        output = build_output_path(video.stem, op["key"])
-        cmd = build_command(video, op, values, output)
+        output = build_output_path(video.stem, op["key"], video.suffix or ".mp4")
+
+        uses_intermediates = op["key"] in ("cut", "concat")
+        if uses_intermediates:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="easy-edit-"))
+            tmp_output = tmp_dir / output.name
+            cmd = build_command(video, op, values, tmp_output)
+        else:
+            tmp_dir = None
+            cmd = build_command(video, op, values, output)
 
         print(f"\nCommand:\n  {' '.join(cmd)}\n")
         confirm = input("Run this? (y/n): ").strip().lower()
         if confirm != "y":
             print("Cancelled.\n")
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             continue
 
         print("Running...")
         success, message = run_edit(cmd)
 
         if success:
+            if tmp_dir:
+                shutil.move(str(tmp_output), str(output))
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            last_failed = False
             print(f"\nDone! Output saved to:\n  {output}\n")
         else:
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            last_failed = True
             print(f"\nSomething went wrong:\n  {message}\n")
 
         again = input("Edit another? (y/n): ").strip().lower()
@@ -356,7 +388,7 @@ def main() -> int:
             break
 
     print("Bye!")
-    return 0
+    return 1 if last_failed else 0
 
 
 if __name__ == "__main__":
