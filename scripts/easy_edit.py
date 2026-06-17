@@ -274,6 +274,18 @@ def prompt_value(label: str, validate_type: str) -> str:
         print(f"    Invalid. {hint}")
 
 
+def choose_output_suffix(video: Path, op: dict) -> str:
+    """Pick a safe output container for the easy runner.
+
+    Every menu operation re-encodes video to h264/aac in edit.py, which a
+    WebM container does not accept, so .webm sources are saved as .mp4.
+    Other containers (.mp4/.mov/.mkv) accept h264/aac and are preserved.
+    """
+    if video.suffix.lower() == ".webm":
+        return ".mp4"
+    return video.suffix or ".mp4"
+
+
 def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
@@ -349,7 +361,11 @@ def main() -> int:
         for p in op["prompts"]:
             values.append(prompt_value(p["label"], p["validate"]))
 
-        output = build_output_path(video.stem, op["key"], video.suffix or ".mp4")
+        suffix = choose_output_suffix(video, op)
+        if video.suffix.lower() == ".webm" and suffix != ".webm":
+            print(f"\nWebM input detected. This edit will be saved as "
+                  f"{suffix} for compatibility.")
+        output = build_output_path(video.stem, op["key"], suffix)
 
         uses_intermediates = op["key"] in ("cut", "concat")
         if uses_intermediates:
@@ -358,6 +374,7 @@ def main() -> int:
             cmd = build_command(video, op, values, tmp_output)
         else:
             tmp_dir = None
+            tmp_output = None
             cmd = build_command(video, op, values, output)
 
         print(f"\nCommand:\n  {' '.join(cmd)}\n")
@@ -371,15 +388,28 @@ def main() -> int:
         print("Running...")
         success, message = run_edit(cmd)
 
-        if success:
-            if tmp_dir:
+        # For temp-dir operations, promote the finished file into output/.
+        if success and uses_intermediates:
+            if tmp_output.exists() and tmp_output.stat().st_size > 0:
                 shutil.move(str(tmp_output), str(output))
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                success = False
+                message = "the edit finished but produced no output file"
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # A zero-byte or missing result is a failure, even on exit code 0.
+        if success and (not output.exists() or output.stat().st_size == 0):
+            success = False
+            message = "the edit finished but produced no output file"
+
+        if success:
             last_failed = False
             print(f"\nDone! Output saved to:\n  {output}\n")
         else:
-            if tmp_dir:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            # Never leave a broken or partial file behind in output/.
+            if output.exists():
+                output.unlink()
             last_failed = True
             print(f"\nSomething went wrong:\n  {message}\n")
 
