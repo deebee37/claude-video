@@ -856,6 +856,19 @@ def op_sharpen(input_path: Path, output_path: Path,
         raise SystemExit(f"[edit] sharpen failed:\n{r.stderr}")
 
 
+def op_denoise(input_path: Path, output_path: Path,
+               cfg: EncodeConfig, strip_meta: bool) -> None:
+    """Reduce video noise using the hqdn3d denoiser."""
+    _status("denoising (hqdn3d)")
+    r = _run(["ffmpeg", "-y", "-i", str(input_path),
+              "-vf", "hqdn3d=4:3:6:4.5"]
+             + _strip_flags(strip_meta)
+             + cfg.video_flags() + cfg.audio_copy()
+             + [str(output_path)], check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"[edit] denoise failed:\n{r.stderr}")
+
+
 def op_watermark(input_path: Path, output_path: Path,
                  text: str | None, image_path: Path | None,
                  position: str, opacity: float, padding: int,
@@ -1030,6 +1043,8 @@ def main() -> int:
                          "Video is stream-copied unchanged. One-pass loudnorm.")
     ap.add_argument("--sharpen", action="store_true",
                     help="Sharpen video using unsharp mask (luma 5x5 +0.8, chroma 3x3 +0.4).")
+    ap.add_argument("--denoise", action="store_true",
+                    help="Reduce video noise using hqdn3d denoiser (luma 4:3, chroma 6:4.5).")
 
     # Watermark
     ap.add_argument("--watermark-text", metavar="TEXT",
@@ -1139,6 +1154,7 @@ def main() -> int:
         args.blur is not None,
         args.normalize_audio,
         args.sharpen,
+        args.denoise,
         args.watermark_text is not None or args.watermark_image is not None,
     ])
 
@@ -1149,7 +1165,7 @@ def main() -> int:
                          "--stack, --crossfade, --pip, --convert, --look, --lut, "
                          "--letterbox, --fps, --vignette, --grain, --reverse, --loop, "
                          "or --boomerang, --stabilize, --blur, --normalize-audio, --sharpen, "
-                         "--watermark-text, --watermark-image.")
+                         "--denoise, --watermark-text, --watermark-image.")
     if op_count > 1:
         raise SystemExit("[edit] Specify one operation per call. Chain calls for multi-step edits "
                          "(output of one → input of next).")
@@ -1292,6 +1308,9 @@ def main() -> int:
 
     elif args.sharpen:
         op_sharpen(input_path, output_path, cfg, strip_meta)
+
+    elif args.denoise:
+        op_denoise(input_path, output_path, cfg, strip_meta)
 
     elif args.watermark_text is not None or args.watermark_image is not None:
         if args.watermark_text is not None and args.watermark_image is not None:
