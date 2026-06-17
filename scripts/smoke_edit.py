@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -83,14 +84,28 @@ def _ffprobe(path: Path) -> dict:
         "width":     video.get("width"),
         "height":    video.get("height"),
         "has_audio": audio is not None,
+        "avg_frame_rate": video.get("avg_frame_rate", "0/0"),
     }
+
+
+def _parse_rate(value: str) -> float | None:
+    if not value or value == "0/0":
+        return None
+    try:
+        return float(Fraction(value))
+    except (ValueError, ZeroDivisionError):
+        try:
+            return float(value)
+        except ValueError:
+            return None
 
 
 def _check(path: Path,
            min_dur: float | None = None,
            max_dur: float | None = None,
            w: int | None = None,
-           h: int | None = None) -> str | None:
+           h: int | None = None,
+           fps: float | None = None) -> str | None:
     """Return an error string, or None if all checks pass."""
     if not path.exists():
         return "output file missing"
@@ -110,6 +125,12 @@ def _check(path: Path,
         return f"width {m['width']} != expected {w}"
     if h is not None and m["height"] != h:
         return f"height {m['height']} != expected {h}"
+    if fps is not None:
+        actual = _parse_rate(m["avg_frame_rate"])
+        if actual is None:
+            return "could not read avg_frame_rate from output"
+        if abs(actual - fps) > 0.5:
+            return f"fps {actual:.2f} != expected {fps:.2f} (tolerance 0.5)"
     return None
 
 
@@ -117,13 +138,14 @@ def run_ok(name: str, cmd: list[str], out: Path,
            min_dur: float | None = None,
            max_dur: float | None = None,
            w: int | None = None,
-           h: int | None = None) -> bool:
+           h: int | None = None,
+           fps: float | None = None) -> bool:
     """Run cmd, expect exit 0, then verify the output file."""
     r = _run(cmd)
     if r.returncode != 0:
         _fail(name, f"exit {r.returncode}: {r.stderr.strip()[-300:]}")
         return False
-    err = _check(out, min_dur, max_dur, w, h)
+    err = _check(out, min_dur, max_dur, w, h, fps)
     if err:
         _fail(name, err)
         return False
@@ -322,7 +344,7 @@ def run_all(d: Path, only: set[str] | None) -> None:
         out = d / "fps.mp4"
         run_ok("fps",
                EDIT + [str(clip_a), "--fps", "24", "--output", str(out)] + QUALITY,
-               out, min_dur=8.0)
+               out, min_dur=8.0, fps=24.0)
 
     # -- watermark-text -------------------------------------------------------
     if want("watermark-text"):
