@@ -274,14 +274,13 @@ def prompt_value(label: str, validate_type: str) -> str:
 def choose_output_suffix(video: Path) -> str:
     """Pick a safe output container for the easy runner.
 
-    Every menu operation re-encodes video to h264/aac in edit.py, which a
-    WebM container does not accept, so .webm sources are saved as .mp4.
-    .mp4/.mov/.mkv accept h264/aac and keep their source suffix; anything
-    else also falls back to .mp4.
+    edit.py re-encodes video to h264 but some operations copy audio
+    (resize, rotate, sharpen, …).  WebM sources often carry Vorbis audio
+    which MP4 cannot mux, so we use MKV — it accepts any codec combo.
     """
     src = video.suffix.lower()
     if src == ".webm":
-        return ".mp4"
+        return ".mkv"
     if src in (".mp4", ".mov", ".mkv"):
         return video.suffix
     return ".mp4"
@@ -397,7 +396,7 @@ def main() -> int:
 
             suffix = choose_output_suffix(video)
             if video.suffix.lower() == ".webm" and suffix != ".webm":
-                print("\nWebM input detected. Saving this edit as .mp4 for compatibility.")
+                print(f"\nWebM input detected. Saving as {suffix} to preserve audio compatibility.")
             output = build_output_path(video.stem, op["key"], suffix)
 
             uses_intermediates = op["key"] in ("cut", "concat")
@@ -418,6 +417,7 @@ def main() -> int:
                     shutil.rmtree(tmp_dir, ignore_errors=True)
                 continue
 
+            output_existed = output.exists()
             print("Running...")
             success, message = run_edit(cmd)
 
@@ -440,8 +440,7 @@ def main() -> int:
                 last_failed = False
                 print(f"\nDone! Output saved to:\n  {output}\n")
             else:
-                # Never leave a broken or partial file behind in output/.
-                if output.exists():
+                if output.exists() and not output_existed:
                     output.unlink()
                 last_failed = True
                 print(f"\nSomething went wrong:\n  {message}\n")
