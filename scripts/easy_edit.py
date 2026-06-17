@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -36,7 +37,7 @@ OPERATIONS: list[dict] = [
         "key": "trim",
         "flag": "--trim",
         "prompts": [
-            {"label": "Start time (SS, MM:SS, or HH:MM:SS)", "validate": "time"},
+            {"label": "Start time (SS, MM:SS, or HH:MM:SS)", "validate": "time_no_end"},
             {"label": "End time (SS, MM:SS, HH:MM:SS, or 'end')", "validate": "time"},
         ],
     },
@@ -122,30 +123,26 @@ OPERATIONS: list[dict] = [
 # Validation helpers
 # ---------------------------------------------------------------------------
 
+def _is_clock(value: str) -> bool:
+    """True for a non-negative SS / MM:SS / HH:MM:SS timestamp."""
+    parts = value.strip().split(":")
+    if len(parts) > 3:
+        return False
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return False
+    return all(n >= 0 for n in nums)
+
+
 def _validate_time(value: str) -> bool:
     if value.strip().lower() == "end":
         return True
-    parts = value.strip().split(":")
-    if len(parts) > 3:
-        return False
-    try:
-        for p in parts:
-            float(p)
-        return True
-    except ValueError:
-        return False
+    return _is_clock(value)
 
 
 def _validate_time_no_end(value: str) -> bool:
-    parts = value.strip().split(":")
-    if len(parts) > 3:
-        return False
-    try:
-        for p in parts:
-            float(p)
-        return True
-    except ValueError:
-        return False
+    return _is_clock(value)
 
 
 def _validate_size(value: str) -> bool:
@@ -274,6 +271,22 @@ def prompt_value(label: str, validate_type: str) -> str:
         print(f"    Invalid. {hint}")
 
 
+def choose_output_suffix(video: Path) -> str:
+    """Pick a safe output container for the easy runner.
+
+    Every menu operation re-encodes video to h264/aac in edit.py, which a
+    WebM container does not accept, so .webm sources are saved as .mp4.
+    .mp4/.mov/.mkv accept h264/aac and keep their source suffix; anything
+    else also falls back to .mp4.
+    """
+    src = video.suffix.lower()
+    if src == ".webm":
+        return ".mp4"
+    if src in (".mp4", ".mov", ".mkv"):
+        return video.suffix
+    return ".mp4"
+
+
 def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
@@ -288,16 +301,37 @@ def build_command(video: Path, op: dict, values: list[str],
     return cmd
 
 
+_ERROR_HINTS = ("error", "invalid", "not supported", "only ", "could not",
+                "no such", "permission", "unable", "cannot", "failed")
+
+
 def run_edit(cmd: list[str]) -> tuple[bool, str]:
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode == 0:
         return True, r.stdout
-    lines = [ln for ln in r.stderr.splitlines() if "[edit]" in ln]
-    if lines:
-        msg = lines[-1].split("[edit]", 1)[-1].strip()
-    else:
-        msg = r.stderr.strip()[-300:] if r.stderr else f"exit code {r.returncode}"
-    return False, msg
+    stderr = r.stderr or ""
+    # edit.py prints status as "[edit] ..." and reports errors as
+    # "[edit] X failed:"; keep only the failure summary, not status noise.
+    edit_fail = [ln.strip() for ln in stderr.splitlines()
+                 if "[edit]" in ln and "failed" in ln.lower()]
+    detail_lines = [ln.strip() for ln in stderr.splitlines()
+                    if ln.strip() and "[edit]" not in ln]
+
+    parts: list[str] = []
+    if edit_fail:
+        parts.append(edit_fail[-1].split("[edit]", 1)[-1].strip())
+    # Add the underlying ffmpeg reason so the user sees what really happened.
+    reason = ""
+    for ln in detail_lines:
+        if any(k in ln.lower() for k in _ERROR_HINTS):
+            reason = ln
+    if not reason and detail_lines:
+        reason = detail_lines[-1]
+    if reason and reason not in parts:
+        parts.append(reason)
+    if not parts:
+        parts.append(f"exit code {r.returncode}")
+    return False, " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +383,10 @@ def main() -> int:
         for p in op["prompts"]:
             values.append(prompt_value(p["label"], p["validate"]))
 
-        output = build_output_path(video.stem, op["key"], video.suffix or ".mp4")
+        suffix = choose_output_suffix(video)
+        if video.suffix.lower() == ".webm" and suffix != ".webm":
+            print("\nWebM input detected. Saving this edit as .mp4 for compatibility.")
+        output = build_output_path(video.stem, op["key"], suffix)
 
         uses_intermediates = op["key"] in ("cut", "concat")
         if uses_intermediates:
@@ -358,9 +395,10 @@ def main() -> int:
             cmd = build_command(video, op, values, tmp_output)
         else:
             tmp_dir = None
+            tmp_output = None
             cmd = build_command(video, op, values, output)
 
-        print(f"\nCommand:\n  {' '.join(cmd)}\n")
+        print(f"\nCommand:\n  {shlex.join(cmd)}\n")
         confirm = input("Run this? (y/n): ").strip().lower()
         if confirm != "y":
             print("Cancelled.\n")
@@ -371,15 +409,28 @@ def main() -> int:
         print("Running...")
         success, message = run_edit(cmd)
 
-        if success:
-            if tmp_dir:
+        # For temp-dir operations, promote the finished file into output/.
+        if success and uses_intermediates:
+            if tmp_output.exists() and tmp_output.stat().st_size > 0:
                 shutil.move(str(tmp_output), str(output))
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                success = False
+                message = "the edit finished but produced no output file"
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # A zero-byte or missing result is a failure, even on exit code 0.
+        if success and (not output.exists() or output.stat().st_size == 0):
+            success = False
+            message = "the edit finished but produced no output file"
+
+        if success:
             last_failed = False
             print(f"\nDone! Output saved to:\n  {output}\n")
         else:
-            if tmp_dir:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            # Never leave a broken or partial file behind in output/.
+            if output.exists():
+                output.unlink()
             last_failed = True
             print(f"\nSomething went wrong:\n  {message}\n")
 
@@ -394,6 +445,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         print("\n\nCancelled. Bye!")
         sys.exit(0)
