@@ -425,6 +425,9 @@ def main() -> int:
         return 0
 
     print(f"\n=== Easy Video Editor v{VERSION} ===\n")
+    print("  Videos in:   input/")
+    print("  Results in:  output/")
+    print("  Help:        QUICKSTART.md\n")
 
     check_prerequisites()
     ensure_dirs()
