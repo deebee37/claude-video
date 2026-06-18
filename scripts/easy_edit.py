@@ -287,6 +287,15 @@ def choose_output_suffix(video: Path) -> str:
     return ".mp4"
 
 
+def _fmt_file_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{num_bytes} B"
+
+
 def _fmt_duration(seconds: float) -> str:
     s = int(seconds)
     if s >= 3600:
@@ -507,7 +516,14 @@ def main() -> int:
 
             if success:
                 last_failed = False
-                print(f"\nDone! Output saved to:\n  {output}\n")
+                try:
+                    size_text = _fmt_file_size(output.stat().st_size)
+                except OSError:
+                    size_text = None
+                print(f"\nDone! Output saved to:\n  {output}")
+                if size_text:
+                    print(f"  Size: {size_text}")
+                print()
             else:
                 if output.exists() and not output_existed:
                     output.unlink()
