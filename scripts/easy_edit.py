@@ -294,6 +294,20 @@ def _fmt_duration(seconds: float) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
+def _parse_fps(value: str | None) -> int | None:
+    if not value or "/" not in value:
+        return None
+    try:
+        num_s, den_s = value.split("/", 1)
+        num, den = int(num_s), int(den_s)
+        if num <= 0 or den <= 0:
+            return None
+        fps = round(num / den)
+        return fps if fps > 0 else None
+    except ValueError:
+        return None
+
+
 def probe_video(path: Path) -> str | None:
     """Return a short info string like '00:02:35, 1920x1080, 30fps, has audio'."""
     try:
@@ -324,15 +338,9 @@ def probe_video(path: Path) -> str | None:
             w, h = s.get("width"), s.get("height")
             if w and h:
                 parts.append(f"{w}x{h}")
-            fps_str = s.get("avg_frame_rate") or s.get("r_frame_rate", "")
-            if "/" in fps_str:
-                try:
-                    num, den = fps_str.split("/")
-                    fps = round(int(num) / int(den))
-                    if fps > 0:
-                        parts.append(f"{fps}fps")
-                except (ValueError, ZeroDivisionError):
-                    pass
+            fps = _parse_fps(s.get("avg_frame_rate")) or _parse_fps(s.get("r_frame_rate"))
+            if fps:
+                parts.append(f"{fps}fps")
         if s.get("codec_type") == "audio":
             has_audio = True
 
