@@ -18,6 +18,8 @@ import re
 import shlex
 import shutil
 import subprocess
+
+from utils import fmt_duration, fmt_file_size, parse_fps, probe_video
 import sys
 import tempfile
 from datetime import datetime
@@ -287,75 +289,6 @@ def choose_output_suffix(video: Path) -> str:
     return ".mp4"
 
 
-def _fmt_file_size(num_bytes: int) -> str:
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{num_bytes} B"
-
-
-def _fmt_duration(seconds: float) -> str:
-    s = int(seconds)
-    if s >= 3600:
-        return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
-    return f"{s // 60:02d}:{s % 60:02d}"
-
-
-def _parse_fps(value: str | None) -> int | None:
-    if not value or "/" not in value:
-        return None
-    try:
-        num_s, den_s = value.split("/", 1)
-        num, den = int(num_s), int(den_s)
-        if num <= 0 or den <= 0:
-            return None
-        fps = round(num / den)
-        return fps if fps > 0 else None
-    except ValueError:
-        return None
-
-
-def probe_video(path: Path) -> str | None:
-    """Return a short info string like '00:02:35, 1920x1080, 30fps, has audio'."""
-    try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error",
-             "-show_entries", "format=duration:stream=width,height,avg_frame_rate,r_frame_rate,codec_type",
-             "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode != 0:
-            return None
-        data = json.loads(r.stdout)
-    except Exception:
-        return None
-
-    parts: list[str] = []
-
-    dur = data.get("format", {}).get("duration")
-    if dur:
-        try:
-            parts.append(_fmt_duration(float(dur)))
-        except ValueError:
-            pass
-
-    has_audio = False
-    for s in data.get("streams", []):
-        if s.get("codec_type") == "video" and not any("x" in p for p in parts):
-            w, h = s.get("width"), s.get("height")
-            if w and h:
-                parts.append(f"{w}x{h}")
-            fps = _parse_fps(s.get("avg_frame_rate")) or _parse_fps(s.get("r_frame_rate"))
-            if fps:
-                parts.append(f"{fps}fps")
-        if s.get("codec_type") == "audio":
-            has_audio = True
-
-    parts.append("has audio" if has_audio else "no audio")
-    return ", ".join(parts) if len(parts) > 1 else None
-
 
 def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -517,7 +450,7 @@ def main() -> int:
             if success:
                 last_failed = False
                 try:
-                    size_text = _fmt_file_size(output.stat().st_size)
+                    size_text = fmt_file_size(output.stat().st_size)
                 except OSError:
                     size_text = None
                 print(f"\nDone! Output saved to:\n  {output}")
