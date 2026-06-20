@@ -413,6 +413,8 @@ class EasyEditorGUI:
             returncode = self._proc.returncode
             self._proc = None
 
+            if self._closing:
+                return
             if returncode == 0 and output.exists() and output.stat().st_size > 0:
                 try:
                     size_text = fmt_file_size(output.stat().st_size)
@@ -433,7 +435,8 @@ class EasyEditorGUI:
                 self.root.after(0, self._show_failure, error)
         except Exception as exc:
             self._proc = None
-            self.root.after(0, self._show_failure, str(exc))
+            if not self._closing:
+                self.root.after(0, self._show_failure, str(exc))
 
     def _show_success(self, msg: str) -> None:
         self._running = False
