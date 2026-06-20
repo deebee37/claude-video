@@ -2,6 +2,8 @@
 """gui_edit.py -- Tkinter GUI for the easy video editor."""
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -154,11 +156,17 @@ class EasyEditorGUI:
 
     def _on_close(self) -> None:
         if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
+            try:
+                os.killpg(self._proc.pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                self._proc.terminate()
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
+                try:
+                    os.killpg(self._proc.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    self._proc.kill()
         self.root.destroy()
 
     def _build_ui(self) -> None:
@@ -362,17 +370,20 @@ class EasyEditorGUI:
         cmd.extend(values)
         cmd.extend(["--output", str(output)])
 
+        output_existed = output.exists()
+
         self._running = True
         self.run_btn.config(state="disabled")
         self.status_label.config(text="Running edit...", fg="#555555")
 
-        thread = threading.Thread(target=self._run_edit, args=(cmd, output))
+        thread = threading.Thread(target=self._run_edit, args=(cmd, output, output_existed))
         thread.start()
 
-    def _run_edit(self, cmd: list[str], output: Path) -> None:
+    def _run_edit(self, cmd: list[str], output: Path, output_existed: bool) -> None:
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True)
+                                          stderr=subprocess.PIPE, text=True,
+                                          start_new_session=True)
             stdout, stderr = self._proc.communicate()
             returncode = self._proc.returncode
             self._proc = None
@@ -392,7 +403,7 @@ class EasyEditorGUI:
                     error = error or f"exit code {returncode}"
                 else:
                     error = "the edit finished but produced no output file"
-                if output.exists():
+                if output.exists() and not output_existed:
                     output.unlink()
                 self.root.after(0, self._show_failure, error)
         except Exception as exc:
