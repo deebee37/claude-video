@@ -146,9 +146,20 @@ class EasyEditorGUI:
         self.field_widgets: list[tk.Entry | tk.StringVar] = []
         self.field_frame: tk.Frame | None = None
         self._running = False
+        self._proc: subprocess.Popen | None = None
 
         self._build_ui()
         self._update_fields()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self.root.destroy()
 
     def _build_ui(self) -> None:
         tk.Label(
@@ -355,13 +366,18 @@ class EasyEditorGUI:
         self.run_btn.config(state="disabled")
         self.status_label.config(text="Running edit...", fg="#555555")
 
-        thread = threading.Thread(target=self._run_edit, args=(cmd, output), daemon=True)
+        thread = threading.Thread(target=self._run_edit, args=(cmd, output))
         thread.start()
 
     def _run_edit(self, cmd: list[str], output: Path) -> None:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode == 0 and output.exists() and output.stat().st_size > 0:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True)
+            stdout, stderr = self._proc.communicate()
+            returncode = self._proc.returncode
+            self._proc = None
+
+            if returncode == 0 and output.exists() and output.stat().st_size > 0:
                 try:
                     size_text = fmt_file_size(output.stat().st_size)
                 except OSError:
@@ -371,15 +387,16 @@ class EasyEditorGUI:
                     msg += f"\nSize: {size_text}"
                 self.root.after(0, self._show_success, msg)
             else:
-                error = _parse_edit_error(r.stderr or "")
-                if r.returncode != 0:
-                    error = error or f"exit code {r.returncode}"
+                error = _parse_edit_error(stderr or "")
+                if returncode != 0:
+                    error = error or f"exit code {returncode}"
                 else:
                     error = "the edit finished but produced no output file"
-                if output.exists() and output.stat().st_size == 0:
+                if output.exists():
                     output.unlink()
                 self.root.after(0, self._show_failure, error)
         except Exception as exc:
+            self._proc = None
             self.root.after(0, self._show_failure, str(exc))
 
     def _show_success(self, msg: str) -> None:
