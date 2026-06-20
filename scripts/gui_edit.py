@@ -150,15 +150,17 @@ class EasyEditorGUI:
         self._running = False
         self._proc: subprocess.Popen | None = None
         self._closing = False
+        self._proc_lock = threading.Lock()
 
         self._build_ui()
         self._update_fields()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self) -> None:
-        self._closing = True
-        if self._proc and self._proc.poll() is None:
-            self._kill_proc_tree()
+        with self._proc_lock:
+            self._closing = True
+            if self._proc and self._proc.poll() is None:
+                self._kill_proc_tree()
         self.root.destroy()
 
     def _kill_proc_tree(self) -> None:
@@ -398,14 +400,15 @@ class EasyEditorGUI:
 
     def _run_edit(self, cmd: list[str], output: Path, output_existed: bool) -> None:
         try:
-            if self._closing:
-                return
             kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if sys.platform == "win32":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
                 kwargs["start_new_session"] = True
-            self._proc = subprocess.Popen(cmd, **kwargs)
+            with self._proc_lock:
+                if self._closing:
+                    return
+                self._proc = subprocess.Popen(cmd, **kwargs)
             stdout, stderr = self._proc.communicate()
             returncode = self._proc.returncode
             self._proc = None

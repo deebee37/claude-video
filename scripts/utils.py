@@ -25,7 +25,12 @@ def choose_output_suffix(video: Path) -> str:
 def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
-    return OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}{suffix}"
+    candidate = OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}{suffix}"
+    n = 1
+    while candidate.exists():
+        n += 1
+        candidate = OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}_{n}{suffix}"
+    return candidate
 
 
 def fmt_file_size(num_bytes: int) -> str:
