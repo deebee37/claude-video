@@ -2,7 +2,9 @@
 """gui_edit.py -- Tkinter GUI for the easy video editor."""
 from __future__ import annotations
 
+import subprocess
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -10,11 +12,16 @@ from tkinter import filedialog, messagebox
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from utils import probe_video
+from utils import (
+    EDIT_SCRIPT, OUTPUT_DIR, build_output_path, choose_output_suffix,
+    fmt_file_size, probe_video,
+)
 
 OPERATIONS = [
     {
         "name": "Trim (keep a section)",
+        "key": "trim",
+        "flag": "--trim",
         "fields": [
             {"label": "Start time:", "placeholder": "e.g. 0:30"},
             {"label": "End time:", "placeholder": "e.g. 1:45"},
@@ -22,6 +29,8 @@ OPERATIONS = [
     },
     {
         "name": "Cut (remove a section)",
+        "key": "cut",
+        "flag": "--cut",
         "fields": [
             {"label": "Start time:", "placeholder": "e.g. 0:30"},
             {"label": "End time:", "placeholder": "e.g. 1:45"},
@@ -29,44 +38,58 @@ OPERATIONS = [
     },
     {
         "name": "Resize",
+        "key": "resize",
+        "flag": "--resize",
         "fields": [
             {"label": "Size (WxH):", "placeholder": "e.g. 1280x720"},
         ],
     },
     {
         "name": "Rotate",
+        "key": "rotate",
+        "flag": "--rotate",
         "fields": [
             {"label": "Angle:", "type": "choice", "choices": ["90", "180", "270"]},
         ],
     },
     {
         "name": "Speed",
+        "key": "speed",
+        "flag": "--speed",
         "fields": [
             {"label": "Speed factor:", "placeholder": "e.g. 1.5"},
         ],
     },
     {
         "name": "FPS (change frame rate)",
+        "key": "fps",
+        "flag": "--fps",
         "fields": [
             {"label": "FPS:", "placeholder": "e.g. 30"},
         ],
     },
-    {"name": "Normalize audio", "fields": []},
-    {"name": "Sharpen", "fields": []},
-    {"name": "Denoise", "fields": []},
+    {"name": "Normalize audio", "key": "normalize-audio", "flag": "--normalize-audio", "fields": []},
+    {"name": "Sharpen", "key": "sharpen", "flag": "--sharpen", "fields": []},
+    {"name": "Denoise", "key": "denoise", "flag": "--denoise", "fields": []},
     {
         "name": "Watermark (text)",
+        "key": "watermark-text",
+        "flag": "--watermark-text",
         "fields": [
             {"label": "Watermark text:", "placeholder": "e.g. My Video"},
         ],
     },
     {
         "name": "Watermark (image/logo)",
+        "key": "watermark-image",
+        "flag": "--watermark-image",
         "fields": [
             {"label": "Image path:", "type": "file"},
         ],
     },
 ]
+
+WIRED_OPS = {"trim"}
 
 OP_NAMES = [op["name"] for op in OPERATIONS]
 
@@ -80,6 +103,37 @@ IMAGE_EXTENSIONS = [
     ("All files", "*.*"),
 ]
 
+_ERROR_HINTS = ("error", "invalid", "not supported", "only ", "could not",
+                "no such", "permission", "unable", "cannot", "failed")
+_STATUS_PREFIXES = ("working dir:", "input:")
+
+
+def _parse_edit_error(stderr: str) -> str:
+    edit_msgs: list[str] = []
+    detail_lines: list[str] = []
+    for ln in stderr.splitlines():
+        if not ln.strip():
+            continue
+        if "[edit]" in ln:
+            msg = ln.split("[edit]", 1)[-1].strip()
+            if not msg.lower().startswith(_STATUS_PREFIXES):
+                edit_msgs.append(msg)
+        else:
+            detail_lines.append(ln.strip())
+
+    parts: list[str] = []
+    if edit_msgs:
+        parts.append(edit_msgs[-1])
+    reason = ""
+    for ln in detail_lines:
+        if any(k in ln.lower() for k in _ERROR_HINTS):
+            reason = ln
+    if not reason and detail_lines:
+        reason = detail_lines[-1]
+    if reason and reason not in " ".join(parts):
+        parts.append(reason)
+    return " ".join(parts) if parts else "unknown error"
+
 
 class EasyEditorGUI:
     def __init__(self, root: tk.Tk) -> None:
@@ -91,6 +145,7 @@ class EasyEditorGUI:
         self.video_path: Path | None = None
         self.field_widgets: list[tk.Entry | tk.StringVar] = []
         self.field_frame: tk.Frame | None = None
+        self._running = False
 
         self._build_ui()
         self._update_fields()
@@ -270,15 +325,72 @@ class EasyEditorGUI:
         self.status_label.config(text="")
 
     def _on_run(self) -> None:
+        if self._running or not self.video_path:
+            return
+
         op = self._get_current_op()
+
+        if op["key"] not in WIRED_OPS:
+            messagebox.showinfo(
+                "Not yet available",
+                f"{op['name']} will be added in a later PR.",
+            )
+            return
+
         values = self._get_field_values()
-        detail = f"Operation: {op['name']}"
-        if values:
-            detail += f"\nValues: {', '.join(values)}"
-        messagebox.showinfo(
-            "Not yet available",
-            f"{detail}\n\nEdit execution will be added in the next PR.",
-        )
+        for v in values:
+            if not v.strip():
+                messagebox.showwarning("Missing input", "Please fill in all fields.")
+                return
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        suffix = choose_output_suffix(self.video_path)
+        output = build_output_path(self.video_path.stem, op["key"], suffix)
+
+        cmd = [sys.executable, str(EDIT_SCRIPT), str(self.video_path), op["flag"]]
+        cmd.extend(values)
+        cmd.extend(["--output", str(output)])
+
+        self._running = True
+        self.run_btn.config(state="disabled")
+        self.status_label.config(text="Running edit...", fg="#555555")
+
+        thread = threading.Thread(target=self._run_edit, args=(cmd, output), daemon=True)
+        thread.start()
+
+    def _run_edit(self, cmd: list[str], output: Path) -> None:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0 and output.exists() and output.stat().st_size > 0:
+                try:
+                    size_text = fmt_file_size(output.stat().st_size)
+                except OSError:
+                    size_text = ""
+                msg = f"Done! Output saved to:\n{output}"
+                if size_text:
+                    msg += f"\nSize: {size_text}"
+                self.root.after(0, self._show_success, msg)
+            else:
+                error = _parse_edit_error(r.stderr or "")
+                if r.returncode != 0:
+                    error = error or f"exit code {r.returncode}"
+                else:
+                    error = "the edit finished but produced no output file"
+                if output.exists() and output.stat().st_size == 0:
+                    output.unlink()
+                self.root.after(0, self._show_failure, error)
+        except Exception as exc:
+            self.root.after(0, self._show_failure, str(exc))
+
+    def _show_success(self, msg: str) -> None:
+        self._running = False
+        self.run_btn.config(state="normal")
+        self.status_label.config(text=msg, fg="#228B22")
+
+    def _show_failure(self, msg: str) -> None:
+        self._running = False
+        self.run_btn.config(state="normal")
+        self.status_label.config(text=f"Something went wrong:\n{msg}", fg="#CC0000")
 
 
 def main() -> None:

@@ -2,8 +2,30 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = REPO_ROOT / "output"
+EDIT_SCRIPT = Path(__file__).resolve().parent / "edit.py"
+
+
+def choose_output_suffix(video: Path) -> str:
+    src = video.suffix.lower()
+    if src == ".webm":
+        return ".mkv"
+    if src in (".mp4", ".mov", ".mkv"):
+        return video.suffix
+    return ".mp4"
+
+
+def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
+    return OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}{suffix}"
 
 
 def fmt_file_size(num_bytes: int) -> str:
