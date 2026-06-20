@@ -414,6 +414,8 @@ class EasyEditorGUI:
             self._proc = None
 
             if self._closing:
+                if output.exists() and not output_existed:
+                    output.unlink(missing_ok=True)
                 return
             if returncode == 0 and output.exists() and output.stat().st_size > 0:
                 try:
