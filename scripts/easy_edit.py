@@ -19,7 +19,9 @@ import shlex
 import shutil
 import subprocess
 
-from utils import fmt_duration, fmt_file_size, parse_fps, probe_video
+from utils import (build_output_path, choose_output_suffix, fmt_duration,
+                   fmt_file_size, parse_fps, probe_video, EDIT_SCRIPT,
+                   OUTPUT_DIR, REPO_ROOT)
 import sys
 import tempfile
 from datetime import datetime
@@ -28,11 +30,7 @@ from pathlib import Path
 VERSION = "1.0.0"
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".webm")
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
 INPUT_DIR = REPO_ROOT / "input"
-OUTPUT_DIR = REPO_ROOT / "output"
-EDIT_SCRIPT = SCRIPT_DIR / "edit.py"
 
 OPERATIONS: list[dict] = [
     {
@@ -272,28 +270,6 @@ def prompt_value(label: str, validate_type: str) -> str:
                 return _resolve_filepath(raw)
             return raw
         print(f"    Invalid. {hint}")
-
-
-def choose_output_suffix(video: Path) -> str:
-    """Pick a safe output container for the easy runner.
-
-    edit.py re-encodes video to h264 but some operations copy audio
-    (resize, rotate, sharpen, …).  WebM sources often carry Vorbis audio
-    which MP4 cannot mux, so we use MKV — it accepts any codec combo.
-    """
-    src = video.suffix.lower()
-    if src == ".webm":
-        return ".mkv"
-    if src in (".mp4", ".mov", ".mkv"):
-        return video.suffix
-    return ".mp4"
-
-
-
-def build_output_path(input_stem: str, op_key: str, suffix: str = ".mp4") -> Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_stem = re.sub(r"[^\w\-.]", "_", input_stem)
-    return OUTPUT_DIR / f"{safe_stem}_{op_key}_{ts}{suffix}"
 
 
 def build_command(video: Path, op: dict, values: list[str],
