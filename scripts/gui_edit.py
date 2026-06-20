@@ -149,25 +149,42 @@ class EasyEditorGUI:
         self.field_frame: tk.Frame | None = None
         self._running = False
         self._proc: subprocess.Popen | None = None
+        self._closing = False
 
         self._build_ui()
         self._update_fields()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self) -> None:
+        self._closing = True
         if self._proc and self._proc.poll() is None:
+            self._kill_proc_tree()
+        self.root.destroy()
+
+    def _kill_proc_tree(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        if sys.platform == "win32":
             try:
-                os.killpg(self._proc.pid, signal.SIGTERM)
+                subprocess.call(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
             except Exception:
-                self._proc.terminate()
+                proc.kill()
+        else:
             try:
-                self._proc.wait(timeout=5)
+                os.killpg(proc.pid, signal.SIGTERM)
+            except Exception:
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(self._proc.pid, signal.SIGKILL)
+                    os.killpg(proc.pid, signal.SIGKILL)
                 except Exception:
-                    self._proc.kill()
-        self.root.destroy()
+                    proc.kill()
 
     def _build_ui(self) -> None:
         tk.Label(
@@ -381,9 +398,14 @@ class EasyEditorGUI:
 
     def _run_edit(self, cmd: list[str], output: Path, output_existed: bool) -> None:
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True,
-                                          start_new_session=True)
+            if self._closing:
+                return
+            kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            self._proc = subprocess.Popen(cmd, **kwargs)
             stdout, stderr = self._proc.communicate()
             returncode = self._proc.returncode
             self._proc = None
