@@ -158,14 +158,14 @@ class EasyEditorGUI:
         if self._proc and self._proc.poll() is None:
             try:
                 os.killpg(self._proc.pid, signal.SIGTERM)
-            except (OSError, ProcessLookupError):
+            except Exception:
                 self._proc.terminate()
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(self._proc.pid, signal.SIGKILL)
-                except (OSError, ProcessLookupError):
+                except Exception:
                     self._proc.kill()
         self.root.destroy()
 
