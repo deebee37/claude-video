@@ -1,3 +1,6 @@
 @echo off
+pushd "%~dp0"
 python scripts\gui_edit.py %*
-if %errorlevel% neq 0 pause
+set exitcode=%errorlevel%
+popd
+if %exitcode% neq 0 pause
