@@ -91,7 +91,7 @@ OPERATIONS = [
     },
 ]
 
-WIRED_OPS = {"trim"}
+WIRED_OPS = {"trim", "cut", "resize", "rotate", "speed", "fps", "normalize-audio", "sharpen", "denoise", "watermark-text", "watermark-image"}
 
 OP_NAMES = [op["name"] for op in OPERATIONS]
 
