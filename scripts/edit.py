@@ -539,9 +539,15 @@ def op_convert(input_path: Path, output_path: Path,
                cfg: EncodeConfig, strip_meta: bool) -> None:
     """Re-encode the video into a different container (format conversion)."""
     _status(f"converting to {output_path.suffix.lstrip('.')}")
+    if output_path.suffix.lower() == ".webm":
+        # WebM container only accepts VP8/VP9/AV1 video and Vorbis/Opus audio
+        codec_flags = ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
+                       "-c:a", "libopus", "-b:a", "128k"]
+    else:
+        codec_flags = cfg.video_flags() + cfg.audio_flags()
     r = _run(["ffmpeg", "-y", "-i", str(input_path)]
              + _strip_flags(strip_meta)
-             + cfg.video_flags() + cfg.audio_flags()
+             + codec_flags
              + [str(output_path)], check=False)
     if r.returncode != 0:
         raise SystemExit(f"[edit] convert failed:\n{r.stderr}")
