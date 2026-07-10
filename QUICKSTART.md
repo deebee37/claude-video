@@ -1,16 +1,23 @@
 # Quick Start: Edit Videos on Your PC
 
-A simple menu that lets you trim, resize, rotate, speed up, and more — no command-line knowledge needed.
+Three ways to edit, easiest first. All of them use the same engine and save
+results to the `output/` folder. **No pip installs needed — everything runs on
+plain Python.**
+
+| Editor | Best for | Start it with |
+|---|---|---|
+| **Web editor** (recommended) | Everyone — works in your browser, even from your phone | `run_web.bat` / `./run_web.sh` |
+| Desktop GUI | A native window on your PC | `run_gui.bat` / `./run_gui.sh` |
+| Menu (terminal) | Keyboard-only / SSH sessions | `run_easy_edit.bat` / `./run_easy_edit.sh` |
 
 ## What you need
 
 - **Python 3.8 or newer.** Check with: `python3 --version`
-- **ffmpeg and ffprobe.** The editor checks for these on startup and tells you how to install them if they are missing:
+- **ffmpeg and ffprobe.** The editors check for these on startup and tell you
+  how to install them if they are missing:
   - Windows: `winget install Gyan.FFmpeg`
   - macOS: `brew install ffmpeg`
   - Linux: `sudo apt install ffmpeg`
-
-No other installs or packages are required.
 
 ## Setup
 
@@ -20,83 +27,127 @@ Download or clone this repo to your computer:
 git clone https://github.com/deebee37/claude-video.git
 ```
 
-That's it. No pip install needed.
+That's it.
 
-## Step 1: Put your video in the input folder
+---
 
-Copy or move a video file into the `input/` folder inside the repo. Supported formats: `.mp4`, `.mov`, `.mkv`, `.webm`.
+## The web editor (recommended)
 
-## Step 2: Run the editor
+**Windows:** Double-click `run_web.bat`.
+
+**macOS or Linux:**
+
+```
+./run_web.sh
+```
+
+**Any platform / Replit:**
+
+```
+python3 scripts/web_edit.py
+```
+
+Then open **http://localhost:5000** in your browser. (On Replit the app
+appears in the Preview pane automatically — it binds to the `PORT` Replit
+provides.)
+
+### Using it
+
+1. **Upload a video** with the file picker — or drop the file into `input/`
+   first and pick it from the dropdown.
+2. **Choose an operation** — all 34 operations, grouped by category. The form
+   shows only the fields that operation needs.
+3. **Run Edit.** The edit runs in the background; a status page refreshes
+   itself until it's done, so big videos won't freeze your browser.
+4. **Preview and download** the result right on the page.
+
+The **Library** tab lists every finished video in `output/` with preview and
+download links.
+
+### Phone bonus
+
+If your phone is on the same wifi as your PC, open
+`http://<your-PC's-IP>:5000` on the phone and edit from the couch.
+
+### All 34 operations
+
+- **Trim & Cut** — trim (keep a section), cut (remove a section)
+- **Size & Framing** — resize, rotate, crop, letterbox
+- **Speed & Time** — speed, FPS, reverse, loop, boomerang
+- **Audio** — mute, volume, normalize, fade in, fade out, replace audio track
+- **Enhance** — sharpen, denoise, stabilize, blur a region
+- **Style** — 8 color looks (cinematic, moody, warm, cool, b&w, vintage,
+  teal-orange, film), vignette, film grain
+- **Text & Watermark** — text overlay (position/size/color/timing),
+  text watermark, image/logo watermark
+- **Combine two videos** — join, side-by-side, stack, crossfade,
+  overlay, picture-in-picture
+- **Convert** — mp4 / mov / mkv / webm
+
+There's also an **Advanced: output quality** option on every edit
+(preview / standard / high / master).
+
+---
+
+## The desktop GUI
+
+**Windows:** Double-click `run_gui.bat`.
+**macOS or Linux:** `./run_gui.sh`
+**Any platform:** `python3 scripts/gui_edit.py`
+
+A window opens: choose a video, pick one of 11 common operations, fill in the
+fields, hit **Run Edit**.
+
+---
+
+## The terminal menu
 
 **Windows:** Double-click `run_easy_edit.bat`.
-
-**macOS or Linux:** Open a terminal in the repo folder and run:
-
-```
-./run_easy_edit.sh
-```
-
-**Any platform:** You can also run directly with:
-
-```
-python3 scripts/easy_edit.py
-```
-
-## Step 3: Follow the menu
+**macOS or Linux:** `./run_easy_edit.sh`
+**Any platform:** `python3 scripts/easy_edit.py`
 
 1. The editor lists your video files. Pick one by number.
 2. It shows 11 editing operations. Pick one by number.
 3. If the operation needs extra info (like a start time or size), it asks you.
 4. It shows the exact command it will run and asks you to confirm with `y`.
-5. The edit runs. When it finishes, your new file is saved in the `output/` folder.
-6. It asks if you want to edit another video.
+5. The edit runs. When it finishes, your new file is saved in `output/`.
 
-## Available operations
+Quick checks:
 
-| # | Operation | What it does |
-|---|-----------|-------------|
-| 1 | Trim | Keep only a section of the video (set start and end times) |
-| 2 | Cut | Remove a section from the middle (set start and end times) |
-| 3 | Resize | Change the video dimensions (e.g. 1920x1080, 1280x720) |
-| 4 | Rotate | Rotate the video 90, 180, or 270 degrees |
-| 5 | Speed | Speed up or slow down (2.0 = double speed, 0.5 = half speed) |
-| 6 | FPS | Change the frame rate (e.g. 24, 30, 60) |
-| 7 | Normalize audio | Even out loud and quiet parts |
-| 8 | Sharpen | Make the image crisper |
-| 9 | Denoise | Reduce video grain and noise |
-| 10 | Watermark (text) | Add text over the video (e.g. your name or a date) |
-| 11 | Watermark (image) | Add a logo or image overlay |
+```
+python3 scripts/easy_edit.py --version
+python3 scripts/easy_edit.py --list-ops
+```
+
+---
 
 ## Where to find your edited video
 
-Finished videos are saved in the `output/` folder. The filename includes the operation and a timestamp so nothing gets overwritten:
+Finished videos are saved in the `output/` folder. The filename includes the
+operation and a timestamp so nothing gets overwritten:
 
 ```
 output/myvideo_trim_20260617_143022.mp4
 ```
 
-## Quick checks
-
-See the version:
-
-```
-python3 scripts/easy_edit.py --version
-```
-
-List all available operations:
-
-```
-python3 scripts/easy_edit.py --list-ops
-```
-
 ## Troubleshooting
 
-**"Missing required tool(s): ffmpeg"** — Install ffmpeg using the command shown on screen for your platform (see "What you need" above).
+**"Missing required tool(s): ffmpeg"** — Install ffmpeg using the command
+shown on screen for your platform (see "What you need" above).
 
-**"No video files found"** — Make sure your video is inside the `input/` folder and has one of these extensions: `.mp4`, `.mov`, `.mkv`, `.webm`.
+**Web editor: "This site can't be reached"** — Make sure the black
+console window that `run_web.bat` opened is still running; it must stay open
+while you edit. The address is `http://localhost:5000`.
 
-**"Something went wrong"** — The error message explains what happened. Common causes: the input file is corrupted, or you entered an invalid time/size. Try again with a different value.
+**Port 5000 already in use** — Start it on another port:
+`PORT=8080 python3 scripts/web_edit.py` (then open http://localhost:8080).
 
-**WebM files** — WebM inputs are automatically saved as `.mkv` to preserve audio compatibility. This is normal.
+**"No video files found"** — Make sure your video is inside the `input/`
+folder and has one of these extensions: `.mp4`, `.mov`, `.mkv`, `.webm`.
 
-**Cancel anytime** — Press `Ctrl+C` to stop the editor at any point.
+**WebM files** — WebM inputs are automatically saved as `.mkv` to preserve
+audio compatibility. This is normal. (Converting *to* WebM via the Convert
+operation produces a proper VP9/Opus `.webm`.)
+
+**Cancel anytime** — Press `Ctrl+C` in the console to stop any of the
+editors.
