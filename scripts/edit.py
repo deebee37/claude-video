@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,15 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 from frames import get_metadata, parse_time, format_time
 from looks import get_look_filter
 
+# On Windows, captured stdout defaults to cp1252 which can't encode some
+# characters; never let a print() kill a successful edit.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,6 +63,31 @@ from looks import get_look_filter
 
 def _status(msg: str) -> None:
     print(f"[edit] {msg}", file=sys.stderr)
+
+
+def _drawtext_font() -> str:
+    """fontfile clause for drawtext. Windows ffmpeg builds usually have no
+    fontconfig setup, so point at a system font explicitly."""
+    if sys.platform != "win32":
+        return ""
+    for name in ("arial.ttf", "segoeui.ttf", "calibri.ttf", "tahoma.ttf"):
+        p = Path("C:/Windows/Fonts") / name
+        if p.exists():
+            # ffmpeg's filter parser needs the drive colon escaped even
+            # inside quotes: fontfile='C\:/Windows/Fonts/arial.ttf'
+            escaped = p.as_posix().replace(":", "\\:")
+            return f":fontfile='{escaped}'"
+    return ""
+
+
+def _drawtext_textfile(text: str) -> tuple[str, str]:
+    """Write drawtext content to a temp file; returns (clause, path).
+    Sidesteps ffmpeg filter escaping entirely (apostrophes, colons, %)."""
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="drawtext_")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    escaped = Path(path).as_posix().replace(":", "\\:")
+    return f"textfile='{escaped}'", path
 
 
 def _require(cmd: str) -> None:
@@ -296,20 +331,27 @@ def op_text(input_path: Path, output_path: Path,
         t_end = end if end is not None else 999999
         time_filter = f":enable='between(t,{t_start},{t_end})'"
 
-    # Escape special chars for ffmpeg drawtext
-    safe_text = text.replace("'", "\\'").replace(":", "\\:")
-
-    vf = (f"drawtext=text='{safe_text}'"
+    # Text goes through a temp file (textfile=) so no character in the
+    # user's text can break ffmpeg's filter parsing.
+    tf_clause, tf_path = _drawtext_textfile(text)
+    vf = (f"drawtext={tf_clause}"
+          f"{_drawtext_font()}"
           f":fontsize={size}:fontcolor={color}"
           f":x={x}:y={y}"
           f":shadowcolor=black:shadowx=2:shadowy=2"
           f"{time_filter}")
 
-    r = _run(["ffmpeg", "-y", "-i", str(input_path),
-              "-vf", vf]
-             + _strip_flags(strip_meta)
-             + cfg.video_flags() + cfg.audio_copy()
-             + [str(output_path)], check=False)
+    try:
+        r = _run(["ffmpeg", "-y", "-i", str(input_path),
+                  "-vf", vf]
+                 + _strip_flags(strip_meta)
+                 + cfg.video_flags() + cfg.audio_copy()
+                 + [str(output_path)], check=False)
+    finally:
+        try:
+            os.unlink(tf_path)
+        except OSError:
+            pass
     if r.returncode != 0:
         raise SystemExit(f"[edit] text overlay failed:\n{r.stderr}")
 
@@ -898,17 +940,24 @@ def op_watermark(input_path: Path, output_path: Path,
 
     if text is not None:
         _status(f"adding text watermark: '{text}' at {position}")
-        safe = text.replace("'", "\\'").replace(":", "\\:").replace("%", "\\%")
         x, y = _pos_text[position]
-        vf = (f"drawtext=text='{safe}'"
+        tf_clause, tf_path = _drawtext_textfile(text)
+        vf = (f"drawtext={tf_clause}"
+              f"{_drawtext_font()}"
               f":x={x}:y={y}"
               f":fontsize={font_size}"
               f":fontcolor=white@{opacity:.2f}"
               f":shadowcolor=black@{opacity:.2f}:shadowx=1:shadowy=1")
-        r = _run(["ffmpeg", "-y", "-i", str(input_path), "-vf", vf]
-                 + _strip_flags(strip_meta)
-                 + cfg.video_flags() + cfg.audio_copy()
-                 + [str(output_path)], check=False)
+        try:
+            r = _run(["ffmpeg", "-y", "-i", str(input_path), "-vf", vf]
+                     + _strip_flags(strip_meta)
+                     + cfg.video_flags() + cfg.audio_copy()
+                     + [str(output_path)], check=False)
+        finally:
+            try:
+                os.unlink(tf_path)
+            except OSError:
+                pass
         if r.returncode != 0:
             raise SystemExit(f"[edit] text watermark failed:\n{r.stderr}")
     else:
@@ -1383,7 +1432,7 @@ def main() -> int:
         print("## Preview frames")
         print()
         for ts, fpath in preview_frames:
-            print(f"- `t={ts}` → `{fpath}`")
+            print(f"- `t={ts}` -> `{fpath}`")
     print()
     print(f"*Working directory: {work_dir}*")
 

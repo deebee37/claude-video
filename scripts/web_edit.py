@@ -193,6 +193,7 @@ def start_job(op_name: str, cmd: list[str], output: Path) -> str:
     def worker() -> None:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
                                   timeout=EDIT_TIMEOUT_SECS)
             ok = proc.returncode == 0 and output.exists()
             err = "" if ok else (proc.stderr or proc.stdout or "").strip()[-2000:]
