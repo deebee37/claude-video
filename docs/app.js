@@ -1,5 +1,7 @@
 /* Easy Video Editor -- runs entirely in the browser via ffmpeg.wasm.
-   Engine files are self-hosted in vendor/ (no CDN). */
+   Engine files are self-hosted in vendor/ (no CDN).
+   Long videos are handled by mounting the picked file (WORKERFS)
+   instead of copying it into memory. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -10,6 +12,8 @@ const opSelect = $("opSelect"), trimFields = $("trimFields");
 const runBtn = $("runBtn"), jobCard = $("jobCard"), jobStatus = $("jobStatus");
 const resultCard = $("resultCard"), preview = $("preview"), saveBtn = $("saveBtn");
 const engineBar = $("engineBar"), engineFill = $("engineFill");
+
+const MOUNT_DIR = "/picked";
 
 let ffmpeg = null;
 let chosenFile = null;
@@ -68,6 +72,8 @@ async function boot() {
   const coreURL = new URL("vendor/ffmpeg-core.js", location.href).href;
   const wasmURL = new URL("vendor/ffmpeg-core.wasm", location.href).href;
 
+  let wasmBlobUrl = null;
+  let watchdog = null;
   try {
     setStage("DOWNLOADING ENGINE…", "One-time download (~31 MB). Next time it's instant.");
     engineBar.style.display = "block";
@@ -81,20 +87,29 @@ async function boot() {
     ffmpeg = new FFmpegWASM.FFmpeg();
     ffmpeg.on("log", ({ message }) => log(`ffmpeg: ${message}`));
 
-    const loadPromise = ffmpeg.load({
-      coreURL,
-      wasmURL: URL.createObjectURL(wasmBlob),
+    wasmBlobUrl = URL.createObjectURL(wasmBlob);
+    const loadPromise = ffmpeg.load({ coreURL, wasmURL: wasmBlobUrl });
+    const timeout = new Promise((_, rej) => {
+      watchdog = setTimeout(() => rej(new Error("engine did not start within 90 seconds -- the worker may be blocked; try reloading, or a different browser")), 90000);
     });
-    const timeout = new Promise((_, rej) =>
-      setTimeout(() => rej(new Error("engine did not start within 90 seconds -- the worker may be blocked; try reloading, or a different browser")), 90000));
     await Promise.race([loadPromise, timeout]);
+    clearTimeout(watchdog);
+    watchdog = null;
 
     engineBar.style.display = "none";
     dotEl.className = "dot ready";
     setStage("READY ✅", "Pick a video to begin.");
     updateRunButton();
   } catch (err) {
+    if (watchdog) clearTimeout(watchdog);
+    // Kill any half-started engine BEFORE the blob URL goes away, so a
+    // late load can't race a revoked URL.
+    if (ffmpeg) { try { ffmpeg.terminate(); } catch (_) {} ffmpeg = null; }
     fail("ENGINE", String(err && err.message || err));
+  } finally {
+    // The engine (or its terminated corpse) is done with the wasm fetch;
+    // drop our 31MB copy.
+    if (wasmBlobUrl) URL.revokeObjectURL(wasmBlobUrl);
   }
 }
 
@@ -141,36 +156,51 @@ runBtn.addEventListener("click", async () => {
   if (!ffmpeg || !ffmpeg.loaded || !chosenFile) return;
 
   const op = opSelect.value;
-  let args, outName, niceName;
   const ext = outExt(chosenFile.name);
   const base = chosenFile.name.replace(/\.[^.]+$/, "") || "video";
-  const inName = "input." + (chosenFile.name.split(".").pop() || "mp4").toLowerCase();
+  const outName = "output." + ext;
+  let opArgs, niceName;
 
   if (op === "trim") {
     const start = parseTime($("startInput").value);
     const end = parseTime($("endInput").value);
-    if (start === null || end === null) { alert("Please type both times, like 0:02 and 0:08"); return; }
+    if (start === null || end === null) { alert("Please type both times, like 0:02 and 1:30"); return; }
     if (end <= start) { alert('"Keep until" must be after "Keep from".'); return; }
-    outName = "output." + ext;
     niceName = `${base}_trimmed.${ext}`;
-    args = ["-ss", String(start), "-t", String(end - start), "-i", inName, "-c", "copy", outName];
+    opArgs = (input) => ["-ss", String(start), "-t", String(end - start), "-i", input, "-c", "copy", outName];
   } else {
-    outName = "output." + ext;
     niceName = `${base}_muted.${ext}`;
-    args = ["-i", inName, "-c:v", "copy", "-an", outName];
+    opArgs = (input) => ["-i", input, "-c:v", "copy", "-an", outName];
   }
 
   runBtn.disabled = true;
   resultCard.style.display = "none";
   jobCard.style.display = "block";
 
+  let mounted = false;
+  let copiedInput = null;
   try {
-    jobStatus.textContent = "Reading your video…";
-    log(`job: ${op} -> ffmpeg ${args.join(" ")}`);
-    const data = new Uint8Array(await chosenFile.arrayBuffer());
-    await ffmpeg.writeFile(inName, data);
+    jobStatus.textContent = "Opening your video…";
+    let inPath;
+    try {
+      // Mount the picked file directly: no memory copy, so long
+      // videos (10-20+ minutes) work without exhausting RAM.
+      try { await ffmpeg.createDir(MOUNT_DIR); } catch (_) { /* already exists */ }
+      await ffmpeg.mount("WORKERFS", { files: [chosenFile] }, MOUNT_DIR);
+      mounted = true;
+      inPath = `${MOUNT_DIR}/${chosenFile.name}`;
+      log("Input mode: WORKERFS (no memory copy)");
+    } catch (mountErr) {
+      log(`Input mode: memory copy (fallback) -- mount failed: ${mountErr}`);
+      inPath = "input." + (chosenFile.name.split(".").pop() || "mp4").toLowerCase();
+      const data = new Uint8Array(await chosenFile.arrayBuffer());
+      await ffmpeg.writeFile(inPath, data);
+      copiedInput = inPath;
+    }
 
-    jobStatus.textContent = "Working… (short clips take a second or two)";
+    const args = opArgs(inPath);
+    jobStatus.textContent = "Working… (trims finish fast, even on long videos)";
+    log(`job: ${op} -> ffmpeg ${args.join(" ")}`);
     const rc = await ffmpeg.exec(args);
     if (rc !== 0) throw new Error(`ffmpeg exited with code ${rc} -- open Details below for the exact message`);
 
@@ -187,15 +217,17 @@ runBtn.addEventListener("click", async () => {
     jobCard.style.display = "none";
     resultCard.style.display = "block";
     log(`job done: ${niceName} (${fmtSize(out.length)})`);
-
-    await ffmpeg.deleteFile(inName).catch(() => {});
-    await ffmpeg.deleteFile(outName).catch(() => {});
   } catch (err) {
     jobCard.style.display = "block";
     jobStatus.innerHTML = `<span class="err">Something went wrong: ${String(err && err.message || err)}</span>`;
     logBox.open = true;
     log(`job FAILED: ${err && err.stack || err}`);
   } finally {
+    // Always clean the engine's in-memory files, even after a failure,
+    // so one bad run can't eat the phone's RAM for the whole session.
+    if (mounted) { try { await ffmpeg.unmount(MOUNT_DIR); } catch (_) {} }
+    if (copiedInput) { try { await ffmpeg.deleteFile(copiedInput); } catch (_) {} }
+    try { await ffmpeg.deleteFile(outName); } catch (_) {}
     runBtn.disabled = false;
     updateRunButton();
   }
