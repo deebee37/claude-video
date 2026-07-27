@@ -223,24 +223,29 @@ runBtn.addEventListener("click", async () => {
     jobStatus.textContent = "Working… (trims finish fast, even on long videos)";
     log(`job: ${op} -> ffmpeg ${args.join(" ")}`);
 
-    // Watchdog: the bundled wrapper only resolves exec on a worker
-    // message, so a killed/crashed worker (e.g. OOM on a huge file)
-    // would leave this await pending forever. Race it against a timer;
-    // if the timer wins, the engine is dead and must be rebuilt.
+    // Watchdog: the bundled wrapper only settles a request when the
+    // worker posts back, so a killed/crashed worker (e.g. OOM) leaves
+    // the await pending forever. This covers BOTH exec AND the output
+    // read -- readFile allocates another output-sized buffer and can
+    // OOM the worker after exec already succeeded. If the timer wins,
+    // the engine is dead and must be rebuilt.
     let execTimer;
-    const execTimeout = new Promise((_, rej) => {
+    const timeout = new Promise((_, rej) => {
       execTimer = setTimeout(() => {
         engineDead = true;
         rej(new Error("the edit took too long and was stopped -- the video may be too large for this phone. Reload the page and try a shorter section."));
       }, EXEC_TIMEOUT_MS);
     });
-    let rc;
-    try { rc = await Promise.race([ffmpeg.exec(args), execTimeout]); }
+    const work = (async () => {
+      const rc = await ffmpeg.exec(args);
+      if (rc !== 0) throw new Error(`ffmpeg exited with code ${rc} -- open Details below for the exact message`);
+      const data = await ffmpeg.readFile(outName);
+      if (!data || data.length === 0) throw new Error("the edit finished but the result was empty");
+      return data;
+    })();
+    let out;
+    try { out = await Promise.race([work, timeout]); }
     finally { clearTimeout(execTimer); }
-    if (rc !== 0) throw new Error(`ffmpeg exited with code ${rc} -- open Details below for the exact message`);
-
-    const out = await ffmpeg.readFile(outName);
-    if (!out || out.length === 0) throw new Error("the edit finished but the result was empty");
 
     const mime = { mp4: "video/mp4", webm: "video/webm", mkv: "video/x-matroska" }[ext];
     lastBlobUrl = URL.createObjectURL(new Blob([out.buffer], { type: mime }));

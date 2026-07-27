@@ -4,7 +4,13 @@
    break). Bump CACHE to force everyone onto new files. */
 "use strict";
 
-const CACHE = "phone-editor-v2";
+// Namespace the cache by this worker's own scope (its project path),
+// e.g. ".../claude-video/". CacheStorage names are origin-wide, so two
+// deployments on the same *.github.io origin -- a fork or a test copy --
+// could otherwise share the "phone-editor-" prefix and delete each
+// other's caches on activate. Folding the scope in keeps them isolated.
+const NS = "phone-editor:" + new URL(self.registration.scope).pathname + ":";
+const CACHE = NS + "v2";
 const PRECACHE = [
   "./",
   "./index.html",
@@ -21,13 +27,13 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-  // CacheStorage is origin-wide, but *.github.io hosts every one of the
-  // user's project sites on one origin. Only delete THIS app's own older
-  // caches (the "phone-editor-" prefix) so we never wipe another site's.
+  // Only delete caches in THIS deployment's own namespace (origin + path
+  // scoped), so we never wipe another site's -- or a same-origin fork's
+  // -- caches, even if it also uses a "phone-editor" prefix.
   event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(
-        keys.filter((k) => k.startsWith("phone-editor-") && k !== CACHE)
+        keys.filter((k) => k.startsWith(NS) && k !== CACHE)
             .map((k) => caches.delete(k))))
       .then(() => self.clients.claim()));
 });
