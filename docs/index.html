@@ -79,10 +79,10 @@
     </select>
 
     <div id="trimFields">
-      <label for="startInput">Keep from (like 0:02)</label>
-      <input type="text" id="startInput" inputmode="numeric" placeholder="0:02">
-      <label for="endInput">Keep until (like 0:08)</label>
-      <input type="text" id="endInput" inputmode="numeric" placeholder="0:08">
+      <label for="startInput">Keep from (like 0:02, or just 2 for seconds)</label>
+      <input type="text" id="startInput" inputmode="text" autocomplete="off" placeholder="0:02">
+      <label for="endInput">Keep until (like 0:08, or just 8 for seconds)</label>
+      <input type="text" id="endInput" inputmode="text" autocomplete="off" placeholder="0:08">
     </div>
 
     <button class="btn" id="runBtn" type="button" disabled>3&#41; Run ▶</button>

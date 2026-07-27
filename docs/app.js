@@ -152,12 +152,22 @@ function outExt(name) {
 
 /* ---------- running an edit ---------- */
 
+// If an edit runs longer than this, the worker has almost certainly
+// died (our ops are all stream-copy and finish in seconds even on long
+// videos). We terminate the engine so the run can't hang forever.
+const EXEC_TIMEOUT_MS = 120000;
+
 runBtn.addEventListener("click", async () => {
   if (!ffmpeg || !ffmpeg.loaded || !chosenFile) return;
 
+  // Snapshot the picked file NOW. chosenFile is a mutable global; if the
+  // user picks a different video while this job is opening, every name
+  // and mux decision below must still refer to the file we started with.
+  const file = chosenFile;
+
   const op = opSelect.value;
-  const ext = outExt(chosenFile.name);
-  const base = chosenFile.name.replace(/\.[^.]+$/, "") || "video";
+  const ext = outExt(file.name);
+  const base = file.name.replace(/\.[^.]+$/, "") || "video";
   const outName = "output." + ext;
   let opArgs, niceName;
 
@@ -177,9 +187,17 @@ runBtn.addEventListener("click", async () => {
   resultCard.style.display = "none";
   jobCard.style.display = "block";
 
+  // Release the previous result up front, so the old (possibly large)
+  // output isn't held in memory alongside the new one -- and isn't
+  // stranded if this new edit fails.
+  if (lastBlobUrl) { URL.revokeObjectURL(lastBlobUrl); lastBlobUrl = null; }
+  preview.removeAttribute("src");
+  saveBtn.removeAttribute("href");
+
   let dirCreated = false;
   let mounted = false;
   let copiedInput = null;
+  let engineDead = false;
   try {
     jobStatus.textContent = "Opening your video…";
     let inPath;
@@ -188,15 +206,15 @@ runBtn.addEventListener("click", async () => {
       // videos (10-20+ minutes) work without exhausting RAM.
       try { await ffmpeg.createDir(MOUNT_DIR); dirCreated = true; }
       catch (_) { dirCreated = true; /* already exists -- still ours to remove */ }
-      await ffmpeg.mount("WORKERFS", { files: [chosenFile] }, MOUNT_DIR);
+      await ffmpeg.mount("WORKERFS", { files: [file] }, MOUNT_DIR);
       mounted = true;
-      inPath = `${MOUNT_DIR}/${chosenFile.name}`;
+      inPath = `${MOUNT_DIR}/${file.name}`;
       log("Input mode: WORKERFS");
     } catch (mountErr) {
       log("Input mode: memory-copy fallback");
       log(`(mount failed: ${mountErr})`);
-      inPath = "input." + (chosenFile.name.split(".").pop() || "mp4").toLowerCase();
-      const data = new Uint8Array(await chosenFile.arrayBuffer());
+      inPath = "input." + (file.name.split(".").pop() || "mp4").toLowerCase();
+      const data = new Uint8Array(await file.arrayBuffer());
       await ffmpeg.writeFile(inPath, data);
       copiedInput = inPath;
     }
@@ -204,14 +222,27 @@ runBtn.addEventListener("click", async () => {
     const args = opArgs(inPath);
     jobStatus.textContent = "Working… (trims finish fast, even on long videos)";
     log(`job: ${op} -> ffmpeg ${args.join(" ")}`);
-    const rc = await ffmpeg.exec(args);
+
+    // Watchdog: the bundled wrapper only resolves exec on a worker
+    // message, so a killed/crashed worker (e.g. OOM on a huge file)
+    // would leave this await pending forever. Race it against a timer;
+    // if the timer wins, the engine is dead and must be rebuilt.
+    let execTimer;
+    const execTimeout = new Promise((_, rej) => {
+      execTimer = setTimeout(() => {
+        engineDead = true;
+        rej(new Error("the edit took too long and was stopped -- the video may be too large for this phone. Reload the page and try a shorter section."));
+      }, EXEC_TIMEOUT_MS);
+    });
+    let rc;
+    try { rc = await Promise.race([ffmpeg.exec(args), execTimeout]); }
+    finally { clearTimeout(execTimer); }
     if (rc !== 0) throw new Error(`ffmpeg exited with code ${rc} -- open Details below for the exact message`);
 
     const out = await ffmpeg.readFile(outName);
     if (!out || out.length === 0) throw new Error("the edit finished but the result was empty");
 
     const mime = { mp4: "video/mp4", webm: "video/webm", mkv: "video/x-matroska" }[ext];
-    if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
     lastBlobUrl = URL.createObjectURL(new Blob([out.buffer], { type: mime }));
 
     preview.src = lastBlobUrl;
@@ -232,6 +263,17 @@ runBtn.addEventListener("click", async () => {
     // problems must never replace the original editing error above.
     // Order: unmount -> remove the (now empty) mount dir -> delete any
     // memory-copied input -> delete the output.
+    if (engineDead) {
+      // The worker is gone. FS calls below would hang on it, and
+      // terminate() already frees all of its memory, so skip cleanup
+      // and force a fresh boot.
+      try { ffmpeg.terminate(); } catch (_) {}
+      ffmpeg = null;
+      log("engine terminated after timeout; rebuilding it");
+      updateRunButton();               // stays disabled while ffmpeg is null
+      boot();                          // bring a fresh engine back to READY
+      return;
+    }
     if (mounted) {
       try { await ffmpeg.unmount(MOUNT_DIR); }
       catch (e) { log(`cleanup: unmount failed: ${e}`); }
@@ -247,7 +289,6 @@ runBtn.addEventListener("click", async () => {
     try { await ffmpeg.deleteFile(outName); }
     catch (e) { log(`cleanup: delete output failed: ${e}`); }
     log("cleanup complete");
-    runBtn.disabled = false;
     updateRunButton();
   }
 });

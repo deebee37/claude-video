@@ -21,9 +21,14 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
+  // CacheStorage is origin-wide, but *.github.io hosts every one of the
+  // user's project sites on one origin. Only delete THIS app's own older
+  // caches (the "phone-editor-" prefix) so we never wipe another site's.
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(
+        keys.filter((k) => k.startsWith("phone-editor-") && k !== CACHE)
+            .map((k) => caches.delete(k))))
       .then(() => self.clients.claim()));
 });
 
