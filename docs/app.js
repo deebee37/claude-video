@@ -177,6 +177,7 @@ runBtn.addEventListener("click", async () => {
   resultCard.style.display = "none";
   jobCard.style.display = "block";
 
+  let dirCreated = false;
   let mounted = false;
   let copiedInput = null;
   try {
@@ -185,13 +186,15 @@ runBtn.addEventListener("click", async () => {
     try {
       // Mount the picked file directly: no memory copy, so long
       // videos (10-20+ minutes) work without exhausting RAM.
-      try { await ffmpeg.createDir(MOUNT_DIR); } catch (_) { /* already exists */ }
+      try { await ffmpeg.createDir(MOUNT_DIR); dirCreated = true; }
+      catch (_) { dirCreated = true; /* already exists -- still ours to remove */ }
       await ffmpeg.mount("WORKERFS", { files: [chosenFile] }, MOUNT_DIR);
       mounted = true;
       inPath = `${MOUNT_DIR}/${chosenFile.name}`;
-      log("Input mode: WORKERFS (no memory copy)");
+      log("Input mode: WORKERFS");
     } catch (mountErr) {
-      log(`Input mode: memory copy (fallback) -- mount failed: ${mountErr}`);
+      log("Input mode: memory-copy fallback");
+      log(`(mount failed: ${mountErr})`);
       inPath = "input." + (chosenFile.name.split(".").pop() || "mp4").toLowerCase();
       const data = new Uint8Array(await chosenFile.arrayBuffer());
       await ffmpeg.writeFile(inPath, data);
@@ -225,9 +228,25 @@ runBtn.addEventListener("click", async () => {
   } finally {
     // Always clean the engine's in-memory files, even after a failure,
     // so one bad run can't eat the phone's RAM for the whole session.
-    if (mounted) { try { await ffmpeg.unmount(MOUNT_DIR); } catch (_) {} }
-    if (copiedInput) { try { await ffmpeg.deleteFile(copiedInput); } catch (_) {} }
-    try { await ffmpeg.deleteFile(outName); } catch (_) {}
+    // Each step is independent and only LOGS its failure -- cleanup
+    // problems must never replace the original editing error above.
+    // Order: unmount -> remove the (now empty) mount dir -> delete any
+    // memory-copied input -> delete the output.
+    if (mounted) {
+      try { await ffmpeg.unmount(MOUNT_DIR); }
+      catch (e) { log(`cleanup: unmount failed: ${e}`); }
+    }
+    if (dirCreated) {
+      try { await ffmpeg.deleteDir(MOUNT_DIR); }
+      catch (e) { log(`cleanup: remove ${MOUNT_DIR} failed: ${e}`); }
+    }
+    if (copiedInput) {
+      try { await ffmpeg.deleteFile(copiedInput); }
+      catch (e) { log(`cleanup: delete input failed: ${e}`); }
+    }
+    try { await ffmpeg.deleteFile(outName); }
+    catch (e) { log(`cleanup: delete output failed: ${e}`); }
+    log("cleanup complete");
     runBtn.disabled = false;
     updateRunButton();
   }

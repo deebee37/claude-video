@@ -31,30 +31,25 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== location.origin) return;
 
-  // waitUntil is registered SYNCHRONOUSLY so the browser cannot kill
-  // this worker while a large cache write (the 31MB wasm) is in flight.
-  let settleWrite;
-  const writeDone = new Promise((resolve) => { settleWrite = resolve; });
-  event.waitUntil(writeDone);
-
-  event.respondWith((async () => {
-    try {
-      const hit = await caches.match(event.request);
-      if (hit) { settleWrite(); return hit; }
-      const resp = await fetch(event.request);
-      if (resp.ok && (resp.type === "basic" || resp.type === "default")) {
-        const copy = resp.clone();
-        caches.open(CACHE)
-          .then((c) => c.put(event.request, copy))
-          .catch(() => {})
-          .then(settleWrite);
-      } else {
-        settleWrite();
-      }
-      return resp;
-    } catch (err) {
-      settleWrite();
-      throw err;
+  // ONE shared operation promise, passed synchronously to BOTH
+  // respondWith() and waitUntil(). It awaits the cache write before
+  // resolving, so the browser can never terminate this worker with a
+  // 31MB write still in flight. It settles on every path -- cache hit,
+  // network ok, network fail, put ok, put fail, or unexpected throw --
+  // so the worker is never left waiting on an unresolved promise. A
+  // cache.put failure is caught so it can never break the Response.
+  const op = (async () => {
+    const hit = await caches.match(event.request);
+    if (hit) return hit;
+    const resp = await fetch(event.request);
+    if (resp.ok && (resp.type === "basic" || resp.type === "default")) {
+      const cache = await caches.open(CACHE);
+      try { await cache.put(event.request, resp.clone()); }
+      catch (_) { /* cache write failed; the Response is still valid */ }
     }
-  })());
+    return resp;
+  })();
+
+  event.respondWith(op);
+  event.waitUntil(op);
 });
