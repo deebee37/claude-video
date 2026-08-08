@@ -125,8 +125,14 @@ opSelect.addEventListener("change", () => {
   trimFields.style.display = opSelect.value === "trim" ? "block" : "none";
 });
 
+let jobActive = false;
+
 function updateRunButton() {
-  runBtn.disabled = !(ffmpeg && ffmpeg.loaded && chosenFile);
+  // While a job runs, Run stays disabled even though the engine is
+  // loaded and a file is selected -- otherwise picking a new file mid-job
+  // would re-enable Run and a second click could start a concurrent job
+  // sharing MOUNT_DIR / output.* and corrupt both.
+  runBtn.disabled = jobActive || !(ffmpeg && ffmpeg.loaded && chosenFile);
 }
 
 function fmtSize(n) {
@@ -184,6 +190,8 @@ runBtn.addEventListener("click", async () => {
   }
 
   runBtn.disabled = true;
+  jobActive = true;
+  fileBtn.disabled = true;          // no new pick until this job + cleanup finishes
   resultCard.style.display = "none";
   jobCard.style.display = "block";
 
@@ -200,35 +208,13 @@ runBtn.addEventListener("click", async () => {
   let engineDead = false;
   try {
     jobStatus.textContent = "Opening your video…";
-    let inPath;
-    try {
-      // Mount the picked file directly: no memory copy, so long
-      // videos (10-20+ minutes) work without exhausting RAM.
-      try { await ffmpeg.createDir(MOUNT_DIR); dirCreated = true; }
-      catch (_) { dirCreated = true; /* already exists -- still ours to remove */ }
-      await ffmpeg.mount("WORKERFS", { files: [file] }, MOUNT_DIR);
-      mounted = true;
-      inPath = `${MOUNT_DIR}/${file.name}`;
-      log("Input mode: WORKERFS");
-    } catch (mountErr) {
-      log("Input mode: memory-copy fallback");
-      log(`(mount failed: ${mountErr})`);
-      inPath = "input." + (file.name.split(".").pop() || "mp4").toLowerCase();
-      const data = new Uint8Array(await file.arrayBuffer());
-      await ffmpeg.writeFile(inPath, data);
-      copiedInput = inPath;
-    }
 
-    const args = opArgs(inPath);
-    jobStatus.textContent = "Working… (trims finish fast, even on long videos)";
-    log(`job: ${op} -> ffmpeg ${args.join(" ")}`);
-
-    // Watchdog: the bundled wrapper only settles a request when the
-    // worker posts back, so a killed/crashed worker (e.g. OOM) leaves
-    // the await pending forever. This covers BOTH exec AND the output
-    // read -- readFile allocates another output-sized buffer and can
-    // OOM the worker after exec already succeeded. If the timer wins,
-    // the engine is dead and must be rebuilt.
+    // Watchdog spans EVERYTHING that talks to the worker -- mounting OR
+    // copying the input (the fallback writeFile copies the whole file
+    // into MEMFS and can OOM a big video), exec, and the output read.
+    // The bundled wrapper only settles when the worker posts back, so a
+    // crash in any of these would hang forever. If the timer wins, the
+    // engine is dead and must be rebuilt.
     let execTimer;
     const timeout = new Promise((_, rej) => {
       execTimer = setTimeout(() => {
@@ -237,6 +223,27 @@ runBtn.addEventListener("click", async () => {
       }, EXEC_TIMEOUT_MS);
     });
     const work = (async () => {
+      let inPath;
+      try {
+        // Mount the picked file directly: no memory copy, so long
+        // videos (10-20+ minutes) work without exhausting RAM.
+        try { await ffmpeg.createDir(MOUNT_DIR); dirCreated = true; }
+        catch (_) { dirCreated = true; /* already exists -- still ours to remove */ }
+        await ffmpeg.mount("WORKERFS", { files: [file] }, MOUNT_DIR);
+        mounted = true;
+        inPath = `${MOUNT_DIR}/${file.name}`;
+        log("Input mode: WORKERFS");
+      } catch (mountErr) {
+        log("Input mode: memory-copy fallback");
+        log(`(mount failed: ${mountErr})`);
+        inPath = "input." + (file.name.split(".").pop() || "mp4").toLowerCase();
+        const data = new Uint8Array(await file.arrayBuffer());
+        await ffmpeg.writeFile(inPath, data);
+        copiedInput = inPath;
+      }
+      const args = opArgs(inPath);
+      jobStatus.textContent = "Working… (trims finish fast, even on long videos)";
+      log(`job: ${op} -> ffmpeg ${args.join(" ")}`);
       const rc = await ffmpeg.exec(args);
       if (rc !== 0) throw new Error(`ffmpeg exited with code ${rc} -- open Details below for the exact message`);
       const data = await ffmpeg.readFile(outName);
@@ -262,6 +269,10 @@ runBtn.addEventListener("click", async () => {
     logBox.open = true;
     log(`job FAILED: ${err && err.stack || err}`);
   } finally {
+    // The job is over (success, failure, or timeout): allow new picks
+    // and let updateRunButton reflect real engine/file state again.
+    jobActive = false;
+    fileBtn.disabled = false;
     // Always clean the engine's in-memory files, even after a failure,
     // so one bad run can't eat the phone's RAM for the whole session.
     // Each step is independent and only LOGS its failure -- cleanup

@@ -49,16 +49,31 @@ self.addEventListener("fetch", (event) => {
   // network ok, network fail, put ok, put fail, or unexpected throw --
   // so the worker is never left waiting on an unresolved promise. A
   // cache.put failure is caught so it can never break the Response.
+  // Navigations (opening the page) may carry a query like ?utm_source=…
+  // that was never precached. Match the shell ignoring the query so an
+  // offline reload of such a URL still resolves to the cached page.
+  const isNav = event.request.mode === "navigate";
   const op = (async () => {
-    const hit = await caches.match(event.request);
+    const hit = await caches.match(event.request, isNav ? { ignoreSearch: true } : undefined);
     if (hit) return hit;
-    const resp = await fetch(event.request);
-    if (resp.ok && (resp.type === "basic" || resp.type === "default")) {
-      const cache = await caches.open(CACHE);
-      try { await cache.put(event.request, resp.clone()); }
-      catch (_) { /* cache write failed; the Response is still valid */ }
+    try {
+      const resp = await fetch(event.request);
+      if (resp.ok && (resp.type === "basic" || resp.type === "default")) {
+        const cache = await caches.open(CACHE);
+        try { await cache.put(event.request, resp.clone()); }
+        catch (_) { /* cache write failed; the Response is still valid */ }
+      }
+      return resp;
+    } catch (err) {
+      // Offline and not cached: for a navigation, fall back to the
+      // precached app shell so the editor still opens.
+      if (isNav) {
+        const shell = await caches.match("./index.html", { ignoreSearch: true })
+                   || await caches.match("./", { ignoreSearch: true });
+        if (shell) return shell;
+      }
+      throw err;
     }
-    return resp;
   })();
 
   event.respondWith(op);
