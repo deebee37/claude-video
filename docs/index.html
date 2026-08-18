@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<title>Easy Video Editor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎬</text></svg>">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #101418; color: #e8ecf1;
+    min-height: 100vh; padding: 16px 16px 40px;
+    max-width: 480px; margin: 0 auto;
+  }
+  h1 { font-size: 1.35rem; padding: 12px 0 2px; }
+  .sub { color: #8b96a5; font-size: .9rem; margin-bottom: 14px; }
+  .card {
+    background: #1a2027; border: 1px solid #2a323c; border-radius: 14px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .statusline { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: #f0b429; flex: none; }
+  .dot.ready { background: #3ecf6a; }
+  .dot.error { background: #ef5350; }
+  #status { font-weight: 600; font-size: 1rem; }
+  #statusDetail { color: #8b96a5; font-size: .85rem; margin-top: 6px; }
+  .bar { height: 8px; background: #2a323c; border-radius: 4px; margin-top: 10px; overflow: hidden; display: none; }
+  .bar > div { height: 100%; width: 0%; background: #4a9eff; transition: width .2s; }
+  label { display: block; font-size: .9rem; color: #aeb9c6; margin: 10px 0 4px; }
+  input[type="text"], select {
+    width: 100%; font-size: 1.15rem; padding: 12px; border-radius: 10px;
+    border: 1px solid #2a323c; background: #10161c; color: #e8ecf1;
+    -webkit-appearance: none; appearance: none;
+  }
+  .btn {
+    display: block; width: 100%; text-align: center; font-size: 1.15rem; font-weight: 700;
+    padding: 15px; border-radius: 12px; border: none; margin-top: 12px;
+    background: #2f6fed; color: #fff; cursor: pointer; text-decoration: none;
+  }
+  .btn:disabled { background: #2a323c; color: #6b7684; }
+  .btn.green { background: #2e9e57; }
+  #fileBtn { background: #333d49; }
+  #fileName { color: #8b96a5; font-size: .9rem; margin-top: 8px; word-break: break-all; }
+  #jobCard, #resultCard { display: none; }
+  video { width: 100%; border-radius: 10px; margin-top: 10px; background: #000; }
+  details { margin-top: 16px; }
+  summary { color: #6b7684; font-size: .85rem; cursor: pointer; }
+  #log {
+    font-family: ui-monospace, Menlo, monospace; font-size: .72rem; color: #9fb0c0;
+    background: #0b0f13; border-radius: 8px; padding: 10px; margin-top: 8px;
+    white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow-y: auto;
+  }
+  .hint { color: #6b7684; font-size: .8rem; margin-top: 8px; }
+  .err { color: #ef8a87; }
+</style>
+</head>
+<body>
+  <h1>🎬 Easy Video Editor</h1>
+  <p class="sub">Works right on your phone. Your videos never leave it.</p>
+
+  <div class="card">
+    <div class="statusline"><div class="dot" id="statusDot"></div><div id="status">BOOTING…</div></div>
+    <div id="statusDetail">Getting things ready.</div>
+    <div class="bar" id="engineBar"><div id="engineFill"></div></div>
+  </div>
+
+  <div class="card">
+    <button class="btn" id="fileBtn" type="button">1&#41; Choose a video 📱</button>
+    <input type="file" id="fileInput" accept="video/*" hidden>
+    <div id="fileName">No video chosen yet.</div>
+
+    <label for="opSelect">2&#41; What do you want to do?</label>
+    <select id="opSelect">
+      <option value="trim">Trim — keep only a section</option>
+      <option value="mute">Mute — remove the sound</option>
+    </select>
+
+    <div id="trimFields">
+      <label for="startInput">Keep from (like 0:02, or just 2 for seconds)</label>
+      <input type="text" id="startInput" inputmode="text" autocomplete="off" placeholder="0:02">
+      <label for="endInput">Keep until (like 0:08, or just 8 for seconds)</label>
+      <input type="text" id="endInput" inputmode="text" autocomplete="off" placeholder="0:08">
+    </div>
+
+    <button class="btn" id="runBtn" type="button" disabled>3&#41; Run ▶</button>
+    <p class="hint">Long source videos work with Trim when you keep a shorter section. Mute and long saved sections use more phone memory; keep Mute videos under about 5 minutes. Trim cuts at the nearest whole scene point, so the start may shift a tiny bit.</p>
+  </div>
+
+  <div class="card" id="jobCard">
+    <div id="jobStatus">Working…</div>
+  </div>
+
+  <div class="card" id="resultCard">
+    <div>✅ <b>Done!</b> Check it, then save it.</div>
+    <video id="preview" controls playsinline></video>
+    <a class="btn green" id="saveBtn" download="edited.mp4">Save result ⬇</a>
+  </div>
+
+  <details id="logBox">
+    <summary>Details for fixing problems (tap to open)</summary>
+    <div id="log"></div>
+  </details>
+
+  <script src="vendor/ffmpeg.js"
+          onerror="window.__engineScriptFailed=true"></script>
+  <script src="app.js"
+          onerror="document.getElementById('status').textContent='ERROR';document.getElementById('statusDetail').textContent='app.js failed to load. Check that docs/app.js exists.'"></script>
+</body>
+</html>
